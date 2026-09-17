@@ -1090,6 +1090,64 @@ def main():
           res.get('ok') is True and str(rt.diag.get('git') or '').startswith('ок'),
           rt.diag.get('git'))
 
+    # ------------------------------------------- кнопка «Открыть интерфейс» на базе
+    print('\n[кнопка на компоненте: открыть интерфейс]')
+    import time as _time
+    import webbrowser
+    opened = []
+    real_open = webbrowser.open
+    webbrowser.open = lambda url, *a, **k: (opened.append(url), True)[1]
+    try:
+        # К этому месту тесты уже роняли реестр нод фейкового TD (проверки
+        # самовосстановления), поэтому дерево при необходимости поднимаем заново.
+        bop = rt.o('')
+        if bop is None:
+            fake_td.build_tree(tmp)
+            bop = rt.o('')
+        bop.par.Datadir.val = tmp
+        rt._opened_at = 0.0
+        rt._open_pulses = None
+        rt.open_button_check()
+        check('кнопка: сам по себе запуск браузер не открывает', not opened, opened)
+        bop.par['Openpage'].val = 1
+        rt.open_button_check()
+        check('кнопка: нажатие открывает страницу в браузере',
+              len(opened) == 1 and opened[0].startswith('http://127.0.0.1:'), opened)
+        rt.open_button_check()
+        check('кнопка: без нового нажатия второй раз не открывается',
+              len(opened) == 1, opened)
+        # Колбэк parameterExecuteDAT и покадровая подстраховка срабатывают на одно
+        # и то же нажатие — окно должно открыться одно.
+        bop.par['Openpage'].val = 2
+        rt._opened_at = _time.time()
+        rt.open_button_check()
+        check('кнопка: колбэк и подстраховка вместе не дают двух окон',
+              len(opened) == 1, opened)
+        # Следующее, уже отдельное, нажатие открывает снова (защита от дребезга
+        # действует только на одно и то же нажатие).
+        bop.par['Openpage'].val = 3
+        rt._opened_at = 0.0
+        rt.open_button_check()
+        check('кнопка: после паузы нажатие снова открывает',
+              len(opened) == 2, opened)
+
+        # Тот же путь, но через колбэк параметра — так это делает сам TD
+        pars_path = os.path.join(PAINT, 'td', 'runtime', 'pw_pars.py')
+        with open(pars_path, encoding='utf-8') as f:
+            src_pars = f.read()
+        ns = {'me': object(), '_plog': lambda tag: None, '_pw': lambda dat: rt}
+        exec(compile(src_pars, pars_path, 'exec'), ns)
+        rt._opened_at = 0.0
+        ns['onPulse'](bop.par['Openpage'])
+        check('колбэк onPulse открывает страницу тем же кодом',
+              len(opened) == 3, opened)
+    except Exception:
+        import traceback as _traceback
+        check('кнопка: проверка прошла без исключений', False,
+              _traceback.format_exc()[-400:])
+    finally:
+        webbrowser.open = real_open
+
     print('\n===============================================================')
     bad = [r for r in RESULTS if not r[0]]
     print('проверок: %d, провалов: %d' % (len(RESULTS), len(bad)))

@@ -478,7 +478,7 @@ class Runtime(object):
     def paint_dir(self):
         """Папка данных (`paint/`): из параметра Datadir, иначе — рядом с проектом."""
         try:
-            d = str(self.o(self.base).par['Datadir'].eval() or '').strip()
+            d = str(self.o('').par['Datadir'].eval() or '').strip()
         except Exception:
             d = ''
         if d and os.path.isdir(d):
@@ -553,6 +553,15 @@ class Runtime(object):
                      '-Profile Private' % (int(self.tun.get('port') or 9980),
                                            int(self.tun.get('port') or 9980)))
         text = '\n'.join(lines)
+        # Ссылка видна и в параметрах компонента (`Page`), кнопка рядом —
+        # `Openpage`: её нажатие открывает эту же страницу в браузере на ПК.
+        # Параметра может не быть в старой сборке — это не ошибка, но факт записи
+        # кладём в отчёт: иначе «кнопка не работает» неотличимо от «адрес пустой».
+        try:
+            self.o('').par['Page'].val = local[0]
+            self.diag['page_par'] = True
+        except Exception:
+            self.diag['page_par'] = False
         d = self.try_o('server/address')
         if d is not None:
             try:
@@ -685,17 +694,50 @@ class Runtime(object):
         self.schedule(self._exec_script, spath)
         return True
 
-    def open_page(self):
-        """Открыть страницу в браузере на этом ПК (удобно для проверки)."""
+    def open_page(self, reason=''):
+        """Открыть страницу в браузере на этом ПК.
+
+        Так работают кнопка «Открыть на ПК» на странице и кнопка-параметр
+        `Openpage` на самом компоненте. Двойное срабатывание (колбэк
+        parameterExecuteDAT плюс покадровая подстраховка) гасим здесь: два окна
+        браузера от одного нажатия не нужны.
+        """
+        now = time.time()
+        if (now - getattr(self, '_opened_at', 0.0)) < 1.0:
+            return False
+        self._opened_at = now
         url = self.addresses()[0][0]
         try:
             import webbrowser
             webbrowser.open(url)
-            self.log('открываю в браузере: %s' % url)
+            self.log('открываю в браузере: %s%s'
+                     % (url, (' (%s)' % reason) if reason else ''))
             return True
         except Exception:
             self.err('open-page', traceback.format_exc())
             return False
+
+    def open_button_check(self):
+        """Подстраховка кнопки «Открыть интерфейс» на компоненте.
+
+        Штатно нажатие обрабатывает parameterExecuteDAT (нода `onpulse`). Но в
+        части сборок TD колбэк может не прийти — тогда ловим нажатие сами: у
+        Pulse-параметра значение это счётчик нажатий, и он растёт. Второй раз
+        окно не откроется: open_page() гасит повтор меньше чем за секунду.
+        """
+        par = None
+        try:
+            par = self.o('').par['Openpage']
+        except Exception:
+            return
+        try:
+            cnt = int(par.eval())
+        except Exception:
+            return
+        prev = getattr(self, '_open_pulses', None)
+        self._open_pulses = cnt
+        if prev is not None and cnt > prev:
+            self.open_page(reason='кнопка на компоненте')
 
     def watch_sources(self):
         """Периодическая проверка: изменились ли файлы — надо пересобрать.
@@ -750,6 +792,15 @@ class Runtime(object):
 
     # -- пути ---------------------------------------------------------------
     def o(self, rel):
+        """Оператор внутри компонента.
+
+        `self.o('server/ws')` — нода компонента, `self.o('')` — сам компонент.
+        Раньше в коде было `self.o(self.base)`: путь склеивался дважды
+        (`<base>/<base>`), TD возвращал None, и чтение параметров базового
+        компонента молча падало — например `Datadir` не читался никогда.
+        """
+        if not rel:
+            return _OP(self.base)
         return _OP(self.base + '/' + rel)
 
     def try_o(self, rel):
@@ -1962,6 +2013,7 @@ class Runtime(object):
             if not self.autostart_done:
                 self.autostart(reason='открытие проекта')
             self.watch_sources()
+            self.open_button_check()
         except Exception:
             self.err('autostart', traceback.format_exc())
         try:

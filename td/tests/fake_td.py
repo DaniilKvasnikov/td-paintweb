@@ -763,7 +763,9 @@ def build_tree(paint_dir):
         Srcopacity=Par('Srcopacity', 1.0), Paintvisible=Par('Paintvisible', 1),
         Paintopacity=Par('Paintopacity', 1.0), Fitmode=Par('Fitmode', 3),
         Useext=Par('Useext', 0), Externalsrc=Par('Externalsrc', ''),
-        Flipy=Par('Flipy', 0), Datadir=Par('Datadir', paint_dir))
+        Flipy=Par('Flipy', 0), Datadir=Par('Datadir', paint_dir),
+    # Ссылка на интерфейс в самой базе: адрес и кнопка (Pulse — счётчик нажатий).
+    Page=Par('Page', ''), Openpage=Par('Openpage', 0))
 
     # меню-параметры как в реальном TD
     UNITS = ['fraction', 'pixels', 'nativeres']

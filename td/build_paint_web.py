@@ -382,9 +382,10 @@ def check_pars(base):
               'Srcvisible', 'Srcopacity', 'Paintvisible', 'Paintopacity', 'Fitmode',
               'Srcint', 'Paintint', 'Maskint', 'Colorint', 'Colortemp',
               'Useext', 'Externalsrc', 'Fullframe', 'Fullfps', 'Fulljpeg',
-              'Flipy', 'Datadir'),
+              'Flipy', 'Datadir', 'Page', 'Openpage'),
         'server/ws': ('port', 'active', 'callbacks'),
         'tick': ('active', 'framestart', 'frameend', 'start'),
+        'onpulse': ('active', 'pars'),
         'server/version': (),
         'server/address': (),
         'movie': ('file', 'reloadpulse', 'play', 'speed'),
@@ -426,9 +427,15 @@ def check_pars(base):
         'outmask': (),
     }
     missing = 0
+    # Нода кнопки необязательна: если в этой сборке TD parameterExecuteDAT не
+    # создался, нажатие всё равно ловит рантайм по счётчику параметра Openpage.
+    optional = ('onpulse',)
     for rel, pars in need.items():
         o = base if rel == '.' else base.op(rel)
         if o is None:
+            if rel in optional:
+                rep('нет ноды %s — для неё есть запасной путь в рантайме' % rel)
+                continue
             fail('нет оператора %s' % rel)
             missing += 1
             continue
@@ -461,13 +468,15 @@ def build():
     src_rt = read_file(os.path.join(rt_dir, 'paint_runtime.py'))
     src_cb = read_file(os.path.join(rt_dir, 'pw_callbacks.py'))
     src_ex = read_file(os.path.join(rt_dir, 'pw_execute.py'))
+    src_pars = read_file(os.path.join(rt_dir, 'pw_pars.py'))
     gl_brush = read_file(os.path.join(rt_dir, 'brush.glsl'))
     gl_rest = read_file(os.path.join(rt_dir, 'restore.glsl'))
     gl_unpre = read_file(os.path.join(rt_dir, 'unpremult.glsl'))
     gl_maskapply = read_file(os.path.join(rt_dir, 'maskapply.glsl'))
     gl_colapply = read_file(os.path.join(rt_dir, 'colapply.glsl'))
     for name, text in (('paint_runtime.py', src_rt), ('pw_callbacks.py', src_cb),
-                       ('pw_execute.py', src_ex), ('brush.glsl', gl_brush),
+                       ('pw_execute.py', src_ex), ('pw_pars.py', src_pars),
+                       ('brush.glsl', gl_brush),
                        ('restore.glsl', gl_rest), ('unpremult.glsl', gl_unpre),
                        ('maskapply.glsl', gl_maskapply),
                        ('colapply.glsl', gl_colapply),
@@ -492,7 +501,8 @@ def build():
     except Exception as e:
         rep('проверка имён констант недоступна: %s' % e)
     for name, text in (('paint_runtime.py', src_rt), ('pw_callbacks.py', src_cb),
-                       ('pw_execute.py', src_ex), ('pw_boot.py', boot)):
+                       ('pw_execute.py', src_ex), ('pw_pars.py', src_pars),
+                       ('pw_boot.py', boot)):
         if not text:
             continue
         try:
@@ -649,6 +659,43 @@ def build():
 
     tick = ensure(base, 'executeDAT', 'tick')
 
+    # Кнопка «Открыть интерфейс» на самом компоненте: Pulse-параметр Openpage
+    # обрабатывается parameterExecuteDAT-ом `onpulse`. Так в TD не нужно ни
+    # Textport, ни ручного набора адреса: нажал параметр — страница открылась.
+    parexec = None
+    for tname in ('parameterexecuteDAT', 'parexecuteDAT'):
+        try:
+            cand = ensure(base, tname, 'onpulse')
+        except Exception as e:
+            rep('кнопка: %s в этой сборке TD не создался (%s)' % (tname, e))
+            cand = None
+        if cand is not None:
+            parexec = cand
+            rep('кнопка: нода onpulse создана как %s' % tname)
+            break
+    if parexec is not None:
+        put_text(parexec, boot + '\n\n' + src_pars)
+        try:
+            setp(parexec, active=1)
+        except Exception as e:
+            rep('кнопка: active у onpulse не выставлен: %s' % e)
+        # Имя параметра-списка в разных сборках TD может быть pars/Pars — пробуем
+        # оба и печатаем факт в отчёт. Нажатие всё равно ловит и сам рантайм
+        # (Runtime.open_button_check), поэтому кнопка работает в любом случае.
+        for pname in ('pars', 'Pars'):
+            try:
+                get_par(parexec, pname).val = 'Openpage'
+                rep('кнопка: onpulse.%s = Openpage' % pname)
+                break
+            except Exception:
+                continue
+        else:
+            rep('кнопка: у onpulse не нашёлся параметр со списком — '
+                'нажатие открывает рантайм по счётчику')
+    else:
+        rep('кнопка: parameterExecuteDAT не создан — нажатие открывает рантайм '
+            'по счётчику параметра Openpage')
+
     # ---------------------------------------------------------------- связи
     # Все связи — внутри ОДНОЙ сети (см. комментарий про архитектуру выше).
     # 0 = файл (movie), 1 = внешний TOP, заданный параметром Externalsrc.
@@ -708,8 +755,8 @@ def build():
     put_text(sh_unpre, gl_unpre)
     put_text(sh_maskapply, gl_maskapply)
     put_text(sh_colapply, gl_colapply)
-    for d in (cb, runtime, tick, sh_paint, sh_rest, sh_unpre, sh_maskapply,
-              sh_colapply):
+    for d in [x for x in (cb, runtime, tick, parexec, sh_paint, sh_rest, sh_unpre,
+                          sh_maskapply, sh_colapply) if x is not None]:
         try:
             d.par.language = 'python'
         except Exception:
@@ -829,6 +876,8 @@ def build():
     place(version, -360, -820)
     place(address, -360, -960)
     place(tick, 200, -560)
+    if parexec is not None:
+        place(parexec, 200, -430)
     place(sh_paint, 200, -700)
     place(sh_rest, 440, -700)
     try:
@@ -925,6 +974,11 @@ def build():
         addpar('Int', 'Canvasw', 'Ширина полотна', CANVAS_W)
         addpar('Int', 'Canvash', 'Высота полотна', CANVAS_H)
         addpar('Int', 'Port', 'Порт веб-сервера', PORT)
+        # Ссылка на интерфейс прямо в базе: адрес виден в параметре `Page`
+        # (рантайм обновляет его при старте сервера), а Pulse-кнопка `Openpage`
+        # открывает эту страницу в браузере на этом ПК.
+        addpar('Str', 'Page', 'Адрес интерфейса (открывается кнопкой ниже)')
+        addpar('Pulse', 'Openpage', 'Открыть интерфейс в браузере')
         addpar('Float', 'Patchhz', 'Частота патчей (Гц)', 30.0)
         addpar('Float', 'Proxyfps', 'Частота прокси видео (кадр/с)', 2.0)
         addpar('Int', 'Undodepth', 'Глубина undo', 24)
@@ -1076,6 +1130,7 @@ def build():
     for rel, pars in (
             ('server/ws', ('port', 'active', 'callbacks')),
             ('tick', ('active', 'framestart', 'frameend', 'start')),
+            ('onpulse', ('active', 'pars')),
             ('dabpng', ('file', 'play')),
             ('fb', ('format', 'top')),
             ('brush', ('format', 'outputresolution', 'resolutionw', 'resolutionh')),

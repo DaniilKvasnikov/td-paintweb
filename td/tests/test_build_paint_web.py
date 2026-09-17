@@ -305,6 +305,15 @@ def main():
     check('Datadir указывает на папку данных проекта',
           os.path.normcase(str(base.par.Datadir.eval())) == os.path.normcase(paint_dir),
           base.par.Datadir.eval())
+    # Ссылка на интерфейс прямо в базе: адрес в параметре Page, кнопка Openpage.
+    missing_link = [n for n in ('Page', 'Openpage') if n not in base.par]
+    check('в базе есть ссылка на интерфейс (параметры Page и Openpage)',
+          not missing_link, missing_link)
+    pulse = base.op('onpulse')
+    check('кнопка «Открыть интерфейс» подключена к parameterExecuteDAT onpulse',
+          pulse is not None and pulse.type == 'parameterexecuteDAT'
+          and 'Openpage' in str(getattr(pulse, 'text', '') or ''),
+          None if pulse is None else (pulse.type, len(str(pulse.text or ''))))
     check('страница, стили и клиент лежат в компоненте (tox самодостаточен)',
           all(base.op('web/' + n) is not None and len(str(base.op('web/' + n).text or '')) > 5
               for n in ('index', 'app', 'style')),
