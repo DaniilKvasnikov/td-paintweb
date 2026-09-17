@@ -129,7 +129,7 @@ def main():
     check('снимок сделан (snap_depth=1)', rt.snap_depth == 1)
     check('snap залочен', base.op('snap').lock is True)
     rt._build_dabs()
-    dabs = list(rt.frame_dabs)
+    dabs = list(rt.frame_dabs['paint'])
     # размер 40 * интервал 0.15 = 6 px, длина 200 px -> 34 штампа
     check('число штампов = 34', len(dabs) == 34, len(dabs))
     check('первый штамп в начале', near(dabs[0][0], 100.0) and near(dabs[0][1], 50.0),
@@ -145,8 +145,8 @@ def main():
     check('давление меняет плотность штампа', near(d50[4], 0.5, 0.01), d50[4])
 
     print('\n[3] бюджет кадра не рвёт мазок')
-    rt.frame_dabs = []
-    rt.frame_rect = None
+    rt.frame_dabs['paint'] = []
+    rt.reset_frames()
     pts2 = [(200.0 + i * 75.0, 900.0, 128) for i in range(21)]   # 1500 px -> 251 штамп
     rt.ws_binary('c2', stroke_bytes(8, 1, pts2))
     rt._drain()
@@ -154,8 +154,8 @@ def main():
     frames = 0
     while rt.strokes.get(8) and rt.strokes[8]['queue'] and frames < 60:
         rt._build_dabs()
-        all_dabs.extend(rt.frame_dabs)
-        rt.frame_dabs = []
+        all_dabs.extend(rt.frame_dabs['paint'])
+        rt.frame_dabs['paint'] = []
         frames += 1
     check('мазок собран за несколько кадров', frames > 1, frames)
     check('всего штампов ~251', 250 <= len(all_dabs) <= 252, len(all_dabs))
@@ -167,11 +167,11 @@ def main():
 
     # ------------------------------------------------------------- прямоугольники
     print('\n[4] патч и пересчёт в UV для cropTOP')
-    rt.frame_dabs = list(dabs)
-    rt.frame_rect = None
+    rt.frame_dabs['paint'] = list(dabs)
+    rt.frame_rect['paint'] = None
     for d in dabs:
         rt._grow_rect(d)
-    rect = m._rect_int(rt.frame_rect, 1920, 1080)
+    rect = m._rect_int(rt.frame_rect['paint'], 1920, 1080)
     check('патч покрывает мазок', rect[0] <= 80 and rect[0] + rect[2] >= 320, rect)
     check('патч не вылез за полотно', rect[0] >= 0 and rect[0] + rect[2] <= 1920, rect)
     crop = base.op('crop')
@@ -197,7 +197,7 @@ def main():
     # из-за которой в браузер уезжал патч в один пиксель, растянутый на весь
     # прямоугольник: область передавалась как (x, y, w, h), а _set_crop читает
     # коробку (l, t, r, b). Полный кадр при этом работал (там x = y = 0).
-    rt.send_rect = None
+    rt.send_rect = dict((n, None) for n in m.BUFFERS)
     blob, rq = rt._encode_layer((100, 50, 300, 150), '.png')
     check('_encode_layer вернул запрошенный прямоугольник', rq == (100, 50, 200, 100), rq)
     check('_encode_layer: левый край кропа = x', crop.par.cropleft.eval() == 100.0,
@@ -216,11 +216,11 @@ def main():
     print('\n[5] упаковка штампов в PNG для шейдера')
     import test_selftest_png as _png
     dec = _png.load_selftest_module()
-    rt.frame_dabs = [
+    rt.frame_dabs['paint'] = [
         (100.0, 50.0, 20.0, 0.7, 1.0, 1.0, 0.0, 0.0),
         (200.5, 300.25, 12.0, 0.0, 0.5, 0.0, 1.0, 0.0),
     ]
-    rt.frame_rect = (80.0, 30.0, 300.0, 320.0)
+    rt.frame_rect['paint'] = (80.0, 30.0, 300.0, 320.0)
     rt._apply_uniforms()                      # push_dabs внутри
     dab = base.op('dabpng')
     check('dabpng получил файл текстуры',
@@ -259,7 +259,7 @@ def main():
 
     # ------------------------------------------------------------- завершение мазка
     print('\n[6] завершение мазка: undo и финальный патч')
-    rt.clients['c1'] = {'ready': True, 'need_poster': False, 'need_sync': False}
+    rt.clients['c1'] = {'ready': True, 'need_poster': False, 'sync_queue': []}
     rt.ws_binary('c1', stroke_bytes(7, 2, []))        # пустая пачка с флагом конца
     rt._drain()
     # Штампы доезжают до слоя со задержкой (файл текстуры читается не мгновенно),
@@ -282,17 +282,17 @@ def main():
     ws.sent_text = []
     ws.sent_bin = []
     for _f in range(4):                       # даём пачке доехать до слоя
-        rt.frame_dabs = []
-        rt.frame_rect = None
+        rt.frame_dabs['paint'] = []
+        rt.reset_frames()
         rt.on_frame_start(100 + _f)
         rt.on_frame_end(100 + _f)
     rt._finish_strokes = orig_finish
     ended = closed
     check('мазок завершён после дорисовки', 7 in ended, ended)
     check('накопленных штампов не осталось',
-          not rt.dab_pending['paint'] and not rt.dab_pending['mask']
+          not any(rt.dab_pending.values())
           and not rt.dab_ready,
-          (len(rt.dab_pending['paint']), len(rt.dab_pending['mask']), rt.dab_ready))
+          (rt.dab_pending, rt.dab_ready))
     check('undo-запись создана', len(rt.undo) == 1, len(rt.undo))
     check('файл снимка записан', bool(base.op('cropsnap').saved),
           base.op('cropsnap').saved)
@@ -311,7 +311,7 @@ def main():
         ws.sent_text = []
         ws.sent_bin = []
         rt.force_patch = True
-        rt.send_rect = rt.send_rect or entry['rect']
+        rt.send_rect['paint'] = rt.send_rect['paint'] or entry['rect']
         rt._flush_patches(force_final=True)
         patches = [msg for msg in ws.sent_text
                    if isinstance(msg, tuple) and len(msg) > 1 and '"t": "patch"' in msg[1]]
@@ -369,16 +369,16 @@ def main():
     rt._cmd_clear()
     check('флаг очистки на кадр', rt.clear_frames == 1)
     check('очистка попала в undo', len(rt.undo) == 2, len(rt.undo))
-    check('патч на всё полотно', rt.send_rect == (0, 0, 1920, 1080), rt.send_rect)
+    check('патч на всё полотно', rt.send_rect['paint'] == (0, 0, 1920, 1080), rt.send_rect['paint'])
 
     # ------------------------------------------------------------- uniform-ы
     print('\n[9] uniform-ы кисти и композита (доставка штампов в два кадра)')
-    rt.frame_dabs = list(dabs)
+    rt.frame_dabs['paint'] = list(dabs)
     # frame_rect хранится КОРОБКОЙ (l, t, r, b), а в шейдер уходит (x, y, w, h)
-    rt.frame_rect = (100.0, 50.0, 300.0, 150.0)
+    rt.frame_rect['paint'] = (100.0, 50.0, 300.0, 150.0)
     rt.clear_frames = 0
-    rt.dab_pending = {'paint': [], 'mask': []}
-    rt.dab_pending_rect = {'paint': None, 'mask': None}
+    rt.dab_pending = {'paint': [], 'mask': [], 'colormask': []}
+    rt.dab_pending_rect = {'paint': None, 'mask': None, 'colormask': None}
     rt.dab_ready = None
     rt.dab_ready_rect = None
     # Кадр восстановления области кисть не пускает в слой: снимаем это состояние,
@@ -411,8 +411,8 @@ def main():
 
     # Следующий кадр: новых точек нет, значит текстура уже загружена и можно рисовать
     pulses = base.op('dabpng').par.reloadpulse.pulses
-    rt.frame_dabs = []
-    rt.frame_rect = None
+    rt.frame_dabs['paint'] = []
+    rt.frame_rect['paint'] = None
     rt._apply_uniforms()                      # кадр РИСОВАНИЯ
     check('на следующем кадре uCount.x = число штампов',
           br.par.vec1valuex.eval() == float(len(dabs)), br.par.vec1valuex.eval())
@@ -426,7 +426,7 @@ def main():
 
     # Конец кадра обязан забрать изменённую область в патч — иначе браузер видит
     # мазок только после отпускания мыши (и ластик «не работает» до отпускания).
-    rt.send_rect = None
+    rt.send_rect = dict((n, None) for n in m.BUFFERS)
     rt.paint_rect['paint'] = (100.0, 50.0, 300.0, 150.0)
     rt.last_patch_t = 0.0
     ws.sent_text = []
@@ -451,28 +451,33 @@ def main():
     check('пачка ластика нарисована', br.par.vec1valuex.eval() == 1.0,
           br.par.vec1valuex.eval())
 
-    # Маска рисуется ВТОРОЙ кистью (brushm) в свой буфер, краска при этом не
-    # трогается: это и есть «раздельная логика», которой не хватало.
-    rt.frame_dabs_m = [dabs[0], dabs[1]]
-    rt.frame_rect_m = (100.0, 50.0, 300.0, 150.0)
-    rt.frame_dabs = []
-    rt.frame_rect = None
+    # Маска КАЖДОГО слоя рисуется своей кистью в свой буфер, краска при этом не
+    # трогается: маски слоя цвета и источника — разные буферы.
+    rt.frame_dabs['colormask'] = [dabs[0], dabs[1]]
+    rt.frame_rect['colormask'] = (100.0, 50.0, 300.0, 150.0)
+    rt.reset_frames()
+    # reset_frames гасит всё: возвращаем пачку маски цвета и её область
+    rt.frame_dabs['colormask'] = [dabs[0], dabs[1]]
+    rt.frame_rect['colormask'] = (100.0, 50.0, 300.0, 150.0)
     rt._apply_uniforms()                       # кадр записи текстуры для маски
     rt._apply_uniforms()                       # кадр рисования маски
-    brm = base.op('brushm')
-    check('маска рисуется своей кистью (brushm) с режимом 1',
+    brm = base.op('brushm2')
+    check('маска слоя цвета рисуется своей кистью (brushm2) с режимом 1',
           brm.par.vec1valuey.eval() == 1.0 and brm.par.vec1valuex.eval() == 2.0,
           [brm.par['vec1value' + c].eval() for c in 'xyzw'])
+    check('маска источника при этом не рисуется',
+          base.op('brushm').par.vec1valuex.eval() == 0.0,
+          base.op('brushm').par.vec1valuex.eval())
     check('краска в кадре мазка по маске не рисуется',
           br.par.vec1valuex.eval() == 0.0, br.par.vec1valuex.eval())
-    check('область мазка по маске ушла в патч слоя маски',
-          rt.paint_rect['mask'] is not None and rt.paint_rect['paint'] is None,
-          (rt.paint_rect['mask'], rt.paint_rect['paint']))
-    rt.paint_rect = {'paint': None, 'mask': None}
+    check('область мазка по маске цвета ушла в патч своей маски',
+          rt.paint_rect['colormask'] is not None and rt.paint_rect['paint'] is None,
+          (rt.paint_rect['colormask'], rt.paint_rect['paint']))
+    rt.paint_rect = {'paint': None, 'mask': None, 'colormask': None}
     # кадровый цикл чистит список в конце кадра — повторяем это, иначе следующий
     # же вызов снова положит те же штампы в текстуру
-    rt.frame_dabs_m = []
-    rt.frame_rect_m = None
+    rt.reset_frames()
+    rt.reset_frames()
 
     # ------------------------------------------------ режим берётся из самого мазка
     # Проверяем БОЕВОЙ путь: мазок приходит бинарным пакетом, а не выставляется
@@ -483,12 +488,12 @@ def main():
             ('brush', 2, 0.0, 1.0, 'кисть по слою «Источник» = проявление маски'),
             ('eraser', 0, 0.0, 2.0, 'ластик по слою «Источник» = стирание маски')):
         rt.strokes.clear()
-        rt.dab_pending = {'paint': [], 'mask': []}
-        rt.dab_pending_rect = {'paint': None, 'mask': None}
-        rt.dab_pending_mode = {'paint': 0.0, 'mask': 1.0}
+        rt.dab_pending = {'paint': [], 'mask': [], 'colormask': []}
+        rt.dab_pending_rect = {'paint': None, 'mask': None, 'colormask': None}
+        rt.dab_pending_mode = {'paint': 0.0, 'mask': 1.0, 'colormask': 1.0}
         rt.dab_ready = None
-        rt.frame_dabs = []
-        rt.frame_dabs_m = []
+        rt.frame_dabs['paint'] = []
+        rt.reset_frames()
         rt.tool['tool'] = tool_name
         rt.ws_binary('c1', stroke_bytes(41, 1, [(300, 300, 255), (360, 300, 255)],
                                         layer=layer_id))
@@ -498,14 +503,14 @@ def main():
               rt.dab_pending_mode['paint'] == want_paint
               and rt.dab_pending_mode['mask'] == want_mask,
               (rt.dab_pending_mode,
-               len(rt.dab_pending['paint']), len(rt.dab_pending['mask'])))
+               rt.dab_pending))
     rt.strokes.clear()
-    rt.dab_pending = {'paint': [], 'mask': []}
-    rt.dab_pending_rect = {'paint': None, 'mask': None}
-    rt.dab_pending_mode = {'paint': 0.0, 'mask': 1.0}
+    rt.dab_pending = {'paint': [], 'mask': [], 'colormask': []}
+    rt.dab_pending_rect = {'paint': None, 'mask': None, 'colormask': None}
+    rt.dab_pending_mode = {'paint': 0.0, 'mask': 1.0, 'colormask': 1.0}
     rt.dab_ready = None
-    rt.frame_dabs = []
-    rt.frame_dabs_m = []
+    rt.frame_dabs['paint'] = []
+    rt.reset_frames()
     rt.tool['tool'] = 'brush'
 
     src_lvl = base.op('src_level')
@@ -522,12 +527,12 @@ def main():
           src_lvl.par.opacity.eval())
 
     print('\n[9b] нет «призраков»: кадр без новых точек не рисует старое')
-    rt.frame_dabs = []
-    rt.frame_rect = None
-    rt.frame_dabs_m = []
-    rt.frame_rect_m = None
-    rt.dab_pending = {'paint': [], 'mask': []}
-    rt.dab_pending_rect = {'paint': None, 'mask': None}
+    rt.frame_dabs['paint'] = []
+    rt.reset_frames()
+    rt.reset_frames()
+    rt.reset_frames()
+    rt.dab_pending = {'paint': [], 'mask': [], 'colormask': []}
+    rt.dab_pending_rect = {'paint': None, 'mask': None, 'colormask': None}
     rt.dab_ready = None
     rt.dab_ready_rect = None
     rt.tool['tool'] = 'brush'
@@ -564,14 +569,18 @@ def main():
     # краски есть drawInto (куда адресовать мазок), у маски — ui:0 (своей строки
     # в панели у неё нет: маска — часть слоя «Источник»).
     kinds = [l['kind'] for l in state['layers']]
-    check('/api/state отдаёт источник, слой цвета, краску и буфер маски',
-          kinds == ['source', 'color', 'paint', 'mask'], kinds)
-    check('у слоёв есть цель рисования drawInto (источник и цвет — в маску)',
-          [l.get('drawInto') for l in state['layers'][:3]] == [2, 2, 1],
+    check('/api/state отдаёт источник, цвет, краску и ДВЕ маски',
+          kinds == ['source', 'color', 'paint', 'mask', 'mask'], kinds)
+    check('у слоёв есть цель рисования drawInto (источник и цвет — в свои маски)',
+          [l.get('drawInto') for l in state['layers'][:3]] == [2, 4, 1],
           [l.get('drawInto') for l in state['layers']])
     mask_lay = [l for l in state['layers'] if l['kind'] == 'mask']
-    check('буфер маски скрыт из панели слоёв',
-          len(mask_lay) == 1 and mask_lay[0].get('ui') == 0, state['layers'])
+    check('оба буфера масок скрыты из панели слоёв',
+          len(mask_lay) == 2 and all(l.get('ui') == 0 for l in mask_lay),
+          state['layers'])
+    check('у источника и цвета РАЗНЫЕ маски',
+          [l.get('usesMask') for l in state['layers'][:2]] == [2, 4],
+          [l.get('usesMask') for l in state['layers']])
     resp = {}
     out = rt.http({'method': 'POST', 'uri': '/api/upload', 'pars': {'name': 'my file.png'},
                    'data': b'\x89PNG\r\n\x1a\n'}, resp)
@@ -601,7 +610,7 @@ def main():
     check('обрубок не сломал рантайм', True)
     check('мусор не создал лишних мазков', 7 not in rt.strokes and 8 not in rt.strokes,
           list(rt.strokes))
-    rt.frame_dabs = []
+    rt.frame_dabs['paint'] = []
 
     # ------------------------------------------------------------- статус
     print('\n[12] статус для диагностики')
@@ -819,22 +828,27 @@ def main():
     rt.dab_ready = 0
     rt.dab_ready_rect = None
     rt.paint_rect = None
-    for name in ('frame_dabs_m', 'mask_filled', 'send_rect_m', 'switch_layer'):
+    rt.send_rect = None
+    rt.frame_dabs = []
+    rt.frame_rect = None
+    rt.mask_filled = True
+    for name in ('frame_dabs_m', 'frame_rect_m', 'send_rect_m', 'switch_layer'):
         if hasattr(rt, name):
             delattr(rt, name)
     rt._ensure_state()
-    check('dab_pending снова по слоям',
-          isinstance(rt.dab_pending, dict)
-          and sorted(rt.dab_pending) == ['mask', 'paint'], rt.dab_pending)
-    check('область патчей снова по слоям',
-          isinstance(rt.paint_rect, dict)
-          and sorted(rt.paint_rect) == ['mask', 'paint'], rt.paint_rect)
-    check('поля слоя маски восстановлены',
-          isinstance(getattr(rt, 'frame_dabs_m', None), list)
-          and getattr(rt, 'mask_filled', None) is False
-          and getattr(rt, 'switch_layer', 'paint') == 'paint',
-          (getattr(rt, 'frame_dabs_m', None), getattr(rt, 'mask_filled', None),
-           getattr(rt, 'switch_layer', None)))
+    want = ['colormask', 'mask', 'paint']
+    check('dab_pending снова по буферам (их три)',
+          isinstance(rt.dab_pending, dict) and sorted(rt.dab_pending) == want,
+          rt.dab_pending)
+    check('область патчей снова по буферам',
+          isinstance(rt.paint_rect, dict) and sorted(rt.paint_rect) == want
+          and sorted(rt.send_rect) == want, (rt.paint_rect, rt.send_rect))
+    check('поля покадровых штампов и заливки масок восстановлены',
+          isinstance(rt.frame_dabs, dict) and sorted(rt.frame_dabs) == want
+          and isinstance(rt.frame_rect, dict) and sorted(rt.frame_rect) == want
+          and isinstance(rt.mask_filled, dict) and sorted(rt.mask_filled) == ['colormask', 'mask']
+          and rt.switch_layer == 'paint',
+          (rt.frame_dabs, rt.frame_rect, rt.mask_filled, rt.switch_layer))
     err = None
     try:
         rt.on_frame_start(900)
@@ -937,19 +951,19 @@ def main():
     print('\n[19] заливка маски повторяется после пересборки')
     ver = base.op('server/version')
     was = str(ver.text or '')
-    rt.mask_filled = True
+    rt.mask_filled = {'mask': True, 'colormask': True}
     rt._mask_sig = 'старый-отпечаток'
     ver.text = 'новый-отпечаток'
     rt._mask_fill_check()
-    check('после смены отпечатка маска заливается заново', rt.mask_filled is False,
+    check('после смены отпечатка маска заливается заново', not any(rt.mask_filled.values()),
           (rt.mask_filled, rt.diag.get('mask_fill')))
-    rt.mask_filled = True
+    rt.mask_filled = {'mask': True, 'colormask': True}
     rt._mask_fill_check()
-    check('на том же отпечатке заливка не повторяется', rt.mask_filled is True,
+    check('на том же отпечатке заливка не повторяется', all(rt.mask_filled.values()),
           rt.mask_filled)
     ver.text = was
     rt._mask_sig = None
-    rt.mask_filled = True
+    rt.mask_filled = {'mask': True, 'colormask': True}
 
     # ------------------------------------------- переносимость: чужой проект
     # Компонент вставляют из .tox в другой проект. Записанный в нём Datadir
@@ -1074,8 +1088,12 @@ def main():
           and 1000 <= col.get('temp', 0) <= 40000, col)
     check('границы ползунка температуры приезжают со страницы',
           (col.get('tempMin'), col.get('tempMax')) == (2000, 10000), col)
-    check('кисть по слою цвета рисует маску (своего буфера у него нет)',
-          rt.layer_target(3) == 'mask', rt.layer_target(3))
+    check('кисть по слою цвета рисует СВОЮ маску (не маску источника)',
+          rt.layer_target(3) == 'colormask' and rt.layer_target(0) == 'mask',
+          (rt.layer_target(0), rt.layer_target(3)))
+    check('мазок по слою «Цвет» уходит в буфер его маски',
+          rt.layer_target(4) == 'colormask' and rt.layer_target(2) == 'mask',
+          (rt.layer_target(2), rt.layer_target(4)))
 
     rt._set_layer({'id': 3, 'prop': 'visible', 'value': 1})
     rt._set_layer({'id': 3, 'prop': 'opacity', 'value': 0.4})

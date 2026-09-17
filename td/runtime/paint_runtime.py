@@ -71,6 +71,33 @@ DEFAULT_TUN = {
 }
 
 
+# --- буферы слоёв ----------------------------------------------------------
+# Пиксельных буферов, у каждого своя цепочка нод и свой undo, теперь ТРИ: краска,
+# маска источника и маска слоя цвета. Маски разные специально: то, что открыто
+# для картинки, не обязано совпадать с тем, где виден цвет.
+# Имена нод отличаются суффиксом, поэтому собираются одним помощником
+# (Runtime.bn), а не прописываются парами по всему файлу: иначе третий буфер
+# пришлось бы добавлять в каждом «mask или paint» по отдельности.
+BUFFERS = ('paint', 'mask', 'colormask')
+MASK_BUFFERS = ('mask', 'colormask')
+BUFFER_SUFFIX = {'paint': '', 'mask': 'm', 'colormask': 'm2'}
+BUFFER_LEVEL = {'paint': 'paint_level', 'mask': 'mask_level',
+                'colormask': 'maskc_level'}
+BUFFER_TITLE = {'paint': 'краска', 'mask': 'маска источника',
+                'colormask': 'маска слоя цвета'}
+# Номер буфера в сообщениях клиенту совпадает с id его слоя в панели слоёв.
+BUFFER_WIRE = {'paint': 1, 'mask': 2, 'colormask': 4}
+BUFFER_BY_WIRE = dict((v, k) for k, v in BUFFER_WIRE.items())
+# Порядок полной выгрузки слоёв новому клиенту: сначала краска, потом маски —
+# так браузер показывает картинку целиком и не «моргает» по частям.
+SYNC_ORDER = (BUFFER_WIRE['paint'], BUFFER_WIRE['mask'], BUFFER_WIRE['colormask'])
+# Куда кладутся дампы патчей: по ним разбирают, что именно уехало в браузер.
+PATCH_DUMP = {'paint': 'patch_last.png', 'mask': 'patch_mask_last.png',
+              'colormask': 'patch_colormask_last.png'}
+SYNC_DUMP = {'paint': 'sync_last.png', 'mask': 'sync_mask_last.png',
+             'colormask': 'sync_colormask_last.png'}
+
+
 def kelvin_rgb(kelvin):
     """Цветовая температура в Кельвинах -> RGB 0..1.
 
@@ -400,6 +427,11 @@ def _as_list(x):
 # ------------------------------------------------------------------- рантайм
 
 class Runtime(object):
+    # Буферы слоёв видны и с объекта: самопроверке и диагностике удобно
+    # спрашивать rt.BUFFERS, а не тянуть константы модуля.
+    BUFFERS = BUFFERS
+    MASK_BUFFERS = MASK_BUFFERS
+    BUFFER_WIRE = BUFFER_WIRE
 
     def __init__(self, base_path):
         self.base = base_path
@@ -412,27 +444,26 @@ class Runtime(object):
         self.bins = []
         self.strokes = {}
         self.stroke_seq = 0
-        self.frame_dabs = []
-        self.frame_rect = None
-        # Второй слой — маска источника: у неё свои штампы, своя область и свой
-        # буфер. Смешивать пачки нельзя: текстура штампов одна на обе кисти.
-        self.frame_dabs_m = []
-        self.frame_rect_m = None
+        # У каждого буфера свои штампы, своя область и свой буфер. Смешивать
+        # пачки нельзя: текстура штампов одна на все кисти.
+        self.frame_dabs = dict((n, []) for n in BUFFERS)
+        self.frame_rect = dict((n, None) for n in BUFFERS)
         # Доставка штампов идёт через файл: Python пишет PNG, moviefileinTOP его
         # читает. Чтение не мгновенное — в том кадре, где файл подменили, шейдер
         # ещё видит прежнюю текстуру (в живом TD это выглядело как «нарисовал, а
         # на полотне ничего»). Поэтому пачка штампов не рисуется в том же кадре:
         # сначала она уезжает в текстуру (dab_pending -> dab_ready), и только
         # следующим кадром её рисует кисть, когда текстура уже точно загружена.
-        self.dab_pending = {'paint': [], 'mask': []}
-        self.dab_pending_rect = {'paint': None, 'mask': None}
-        self.dab_pending_mode = {'paint': 0.0, 'mask': 1.0}
+        self.dab_pending = dict((n, []) for n in BUFFERS)
+        self.dab_pending_rect = dict((n, None) for n in BUFFERS)
+        self.dab_pending_mode = dict((n, 0.0 if n == 'paint' else 1.0)
+                                    for n in BUFFERS)
         self.dab_ready = None          # (слой, сколько штампов, режим) — ждёт рисования
         self.dab_ready_rect = None
-        self.mask_filled = False       # маска залита белым: источник виден целиком
-        self.paint_rect = {'paint': None, 'mask': None}   # что изменено в кадре
-        self.send_rect = None
-        self.send_rect_m = None        # область для патча слоя маски
+        # Маски залиты белым: и источник, и цвет видны целиком, пока их не стёрли.
+        self.mask_filled = dict((n, False) for n in MASK_BUFFERS)
+        self.paint_rect = dict((n, None) for n in BUFFERS)   # что изменено в кадре
+        self.send_rect = dict((n, None) for n in BUFFERS)    # область для патча
         self.force_patch = False
         self.clear_frames = 0
         self.snap_depth = 0
@@ -809,6 +840,18 @@ class Runtime(object):
         except Exception:
             return None
 
+    def bn(self, buffer, key):
+        """Имя ноды буфера: bn('mask', 'sw') -> 'swm', bn('colormask', 'buf') -> 'bufm2'."""
+        return key + BUFFER_SUFFIX.get(buffer, '')
+
+    def bo(self, buffer, key):
+        """Нода буфера или None, если её нет в этой сборке TD."""
+        return self.try_o(self.bn(buffer, key))
+
+    def level_of(self, buffer):
+        """levelTOP, задающий прозрачность слоя этого буфера."""
+        return BUFFER_LEVEL.get(buffer, 'paint_level')
+
     def dirs(self):
         """Папки данных.
 
@@ -962,7 +1005,7 @@ class Runtime(object):
         with self.mu:
             self.clients[client] = {
                 'w': 0, 'h': 0, 'dpr': 1.0, 'ready': False,
-                'need_poster': True, 'need_sync': True,
+                'need_poster': True, 'sync_queue': list(SYNC_ORDER),
                 'last_patch': 0.0, 'patches': 0, 'since': time.time(),
                 'last_seen': time.time(),
             }
@@ -1069,28 +1112,29 @@ class Runtime(object):
             {'id': 0, 'name': 'Источник', 'kind': 'source',
              'visible': 1 if t['srcvisible'] > 0.001 else 0,
              'opacity': t['srcopacity'], 'drawInto': 2,
+             # Какая маска показывает этот слой: у источника своя, у цвета своя.
+             'usesMask': 2,
              'fit': self.fit_name(),
              'fitModes': [{'key': k, 'label': lab} for k, lab, _tk in FIT_MODES],
              'srcType': self.src_kind, 'srcName': name, 'srcPath': self.src_path or ''},
-            # Слой монотонного цвета: ровный цвет по той же маске, что и источник
-            # (в TD это color_src + colapply). Стоит между источником и краской —
-            # и в композите, и в панели слоёв порядок один и тот же, сверху вниз.
-            # Кисть по этому слою рисует маску (drawInto=2), как и по «Источнику»:
-            # форма слоя цвета — это маска, своего буфера у него нет.
+            # Слой монотонного цвета: ровный цвет по СВОЕЙ маске (в TD это
+            # color_src + colapply + maskc_level). Стоит между источником и
+            # краской — и в композите, и в панели слоёв порядок один и тот же.
             {'id': 3, 'name': 'Цвет', 'kind': 'color',
              'visible': 1 if t.get('colorvisible', 0.0) > 0.001 else 0,
              'opacity': t.get('colorint', 1.0),
              'temp': int(round(t.get('colortemp', 6500.0))),
              'tempMin': 2000, 'tempMax': 10000, 'tempStep': 50,
-             'drawInto': 2},
+             'drawInto': 4, 'usesMask': 4},
             {'id': 1, 'name': 'Краска', 'kind': 'paint',
              'visible': 1 if t['paintvisible'] > 0.001 else 0,
              'opacity': t['paintopacity'], 'drawInto': 1},
-            # Буфер маски нужен браузеру, чтобы показывать источник, обрезанный
-            # маской, но своей строки в панели слоёв у него нет: маска — часть
-            # слоя «Источник».
+            # Буферы масок нужны браузеру, но своих строк в панели у них нет:
+            # маска — часть своего слоя (источника или цвета).
             {'id': 2, 'name': 'Маска источника', 'kind': 'mask',
-             'visible': 1, 'opacity': 1.0, 'ui': 0},
+             'visible': 1, 'opacity': 1.0, 'ui': 0, 'role': 'source'},
+            {'id': 4, 'name': 'Маска слоя цвета', 'kind': 'mask',
+             'visible': 1, 'opacity': 1.0, 'ui': 0, 'role': 'color'},
         ]
 
     def history(self):
@@ -1160,7 +1204,7 @@ class Runtime(object):
             st = self.clients.setdefault(client, {})
             st.update({'w': int(m.get('w') or 0), 'h': int(m.get('h') or 0),
                        'dpr': float(m.get('dpr') or 1.0), 'ready': True,
-                       'need_poster': True, 'need_sync': True,
+                       'need_poster': True, 'sync_queue': list(SYNC_ORDER),
                        'since': st.get('since', time.time())})
         t = self.tun
         self._send(client, {
@@ -1262,15 +1306,19 @@ class Runtime(object):
     def layer_target(self, layer_id):
         """В какой буфер TD попадёт мазок, адресованный этому слою.
 
-        Слой 1 (краска) — буфер краски. Слой 2 — маска, и туда же идут мазки,
-        адресованные слоям 0 («Источник») и 3 («Цвет»): форма обоих — маска
-        источника, отдельного буфера у них нет.
+        Слой 1 (краска) — буфер краски. Слои «Источник» (0) и «Цвет» (3) рисуют
+        свои маски: у источника это буфер 2, у цвета — буфер 4. Маски разные, и
+        именно поэтому стереть картинку и стереть цвет можно по отдельности.
         """
         try:
             lid = int(layer_id)
         except Exception:
             return 'paint'
-        return 'mask' if lid in (0, 2, 3) else 'paint'
+        if lid in (0, 2):
+            return 'mask'
+        if lid in (3, 4):
+            return 'colormask'
+        return 'paint'
 
     def _points(self, data):
         if len(data) < 9:
@@ -1333,27 +1381,30 @@ class Runtime(object):
     def _build_dabs(self):
         """Точки мазков -> штампы с равномерным шагом по длине пути.
 
-        Штампы раскладываются по двум пачкам: краска и маска. В один кадр кисть
-        рисует только из одной пачки (текстура штампов одна на обе), поэтому
-        смешивать их нельзя — вторая доедет следующим кадром.
+        Штампы раскладываются по пачкам буферов: краска, маска источника, маска
+        цвета. В один кадр кисть рисует только из одной пачки (текстура штампов
+        одна на все кисти), поэтому смешивать их нельзя — остальные доедут
+        следующими кадрами.
         """
         W, H = float(self.tun['w']), float(self.tun['h'])
         spacing_px = max(1.0, float(self.tool['size']) * float(self.tool['spacing']))
         # Бюджет учитывает и штампы этого кадра, и уже накопленные пачки: иначе
         # пачка переполнит текстуру, и часть штампов потеряется.
-        used = (len(self.frame_dabs) + len(self.frame_dabs_m)
-                + len(self.dab_pending['paint']) + len(self.dab_pending['mask']))
+        used = (sum(len(v) for v in self.frame_dabs.values())
+                + sum(len(v) for v in self.dab_pending.values()))
         budget = MAXDABS - used
         if budget <= 0:
             return
         for sid, st in self.strokes.items():
-            tgt = 'mask' if st.get('target') == 'mask' else 'paint'
+            tgt = st.get('target') or 'paint'
+            if tgt not in self.frame_dabs:
+                tgt = 'paint'
             # Режим кисти для этой пачки. Раньше он НЕ проставлялся, и ластик
             # работал как кисть: значение по умолчанию для слоя краски — 0
             # («краска»), для маски — 1 («проявлять»). Отсюда «ластик красит
             # вместо стирания», а на слое «Источник» — «вообще ничего не делает».
             self.dab_pending_mode[tgt] = (2.0 if st.get('eraser')
-                                          else (1.0 if tgt == 'mask' else 0.0))
+                                          else (0.0 if tgt == 'paint' else 1.0))
             q = st['queue']
             i = 0
             while i < len(q) and budget > 0:
@@ -1400,25 +1451,34 @@ class Runtime(object):
                 i += 1
             if i:
                 del q[:i]
-        self.diag['dabs'] = len(self.frame_dabs) + len(self.frame_dabs_m)
+        self.diag['dabs'] = sum(len(v) for v in self.frame_dabs.values())
 
     def _add_dab(self, target, pt):
-        if target == 'mask':
-            self.frame_dabs_m.append(pt)
-        else:
-            self.frame_dabs.append(pt)
+        if target not in self.frame_dabs:
+            target = 'paint'
+        self.frame_dabs[target].append(pt)
         x, y, rad = pt[0], pt[1], pt[2]
         r = (x - rad - 2.0, y - rad - 2.0, x + rad + 2.0, y + rad + 2.0)
-        if target == 'mask':
-            self.frame_rect_m = _union(self.frame_rect_m, r)
-        else:
-            self.frame_rect = _union(self.frame_rect, r)
+        self.frame_rect[target] = _union(self.frame_rect[target], r)
 
     def _grow_rect(self, pt):
         """Область штампов (для uRect и области патча)."""
         x, y, rad = pt[0], pt[1], pt[2]
         r = (x - rad - 2.0, y - rad - 2.0, x + rad + 2.0, y + rad + 2.0)
-        self.frame_rect = _union(self.frame_rect, r)
+        self.frame_rect['paint'] = _union(self.frame_rect['paint'], r)
+
+    def reset_frames(self):
+        """Сбросить покадровые накопления по всем буферам.
+
+        Раньше слоёв с буфером было два, и состояние жило списком на один слой
+        (`frame_dabs = []`); теперь буферов три, поэтому обнулять нужно каждый.
+        """
+        self.frame_dabs = dict((n, []) for n in BUFFERS)
+        self.frame_rect = dict((n, None) for n in BUFFERS)
+        self.dab_pending = dict((n, []) for n in BUFFERS)
+        self.dab_pending_rect = dict((n, None) for n in BUFFERS)
+        self.dab_ready = None
+        self.dab_ready_rect = None
 
     def _grow_bbox(self, st, pt):
         x, y, rad = pt[0], pt[1], pt[2]
@@ -1427,8 +1487,8 @@ class Runtime(object):
 
     # -- undo / redo --------------------------------------------------------
     def _crop_for(self, layer):
-        """Кроп, из которого снимается слой для undo: краска или маска."""
-        return 'cropsnapm' if layer == 'mask' else 'cropsnap'
+        """Кроп, из которого снимается слой для undo: краска или одна из масок."""
+        return self.bn(layer, 'cropsnap')
 
     def _capture(self, crop_rel, rect, tag):
         c = self.o(crop_rel)
@@ -1846,7 +1906,7 @@ class Runtime(object):
             self.dab_ready = None
             self.dab_ready_rect = None
         self.paint_dirty = False
-        self.send_rect = _union(self.send_rect, rect)
+        self.send_rect['paint'] = _union(self.send_rect['paint'], rect)
         self.force_patch = True
         self._broadcast({'t': 'history', **self.history()})
         # Именно notice: это НЕ ошибка, а сообщение о выполненном действии.
@@ -1865,8 +1925,14 @@ class Runtime(object):
             return
         entry = src.pop()
         layer = entry.get('layer', 'paint')
+        if layer not in BUFFERS:
+            layer = 'paint'
         try:
-            cur = self._capture('cropundo', entry['rect'],
+            # Для краски снимок берётся из своего кропа (cropundo), для масок — из
+            # их cropsnap. Раньше здесь был один 'cropundo' на все слои, поэтому
+            # undo по маске сохранял в стек кусок ЧУЖОГО буфера.
+            crop_rel = 'cropundo' if layer == 'paint' else self.bn(layer, 'cropsnap')
+            cur = self._capture(crop_rel, entry['rect'],
                                 'redo' if tag == 'undo' else 'undo')
             dst.append({'rect': entry['rect'], 'path': cur, 'layer': layer})
         except Exception:
@@ -1876,15 +1942,14 @@ class Runtime(object):
                             'frame': self.frame, 'layer': layer}
         self._broadcast({'t': 'history', **self.history()})
         self.log('%s: область %s (%s)' % (tag, entry['rect'],
-                                          'маска' if layer == 'mask' else 'краска'))
+                                          BUFFER_TITLE.get(layer, layer)))
 
     def _finish_strokes(self):
         """Завершение/отмена мазков: снимок региона в стек undo."""
         # Штампы доезжают до слоя со задержкой в кадр-два. Если закрыть мазок
         # раньше, снимок области и последний патч в браузер уедут БЕЗ хвоста
         # мазка — а после undo/redo хвост пропадёт насовсем.
-        if (self.dab_pending['paint'] or self.dab_pending['mask']
-                or self.dab_ready):
+        if (self.dab_ready or any(self.dab_pending[n] for n in BUFFERS)):
             return []
         done = []
         now = time.time()
@@ -1899,7 +1964,9 @@ class Runtime(object):
             if st['queue']:
                 continue
             bbox = st.get('bbox')
-            layer = 'mask' if st.get('target') == 'mask' else 'paint'
+            layer = st.get('target') or 'paint'
+            if layer not in BUFFERS:
+                layer = 'paint'
             crop_rel = self._crop_for(layer)
             done.append(sid)
             if bbox is None:
@@ -1921,10 +1988,7 @@ class Runtime(object):
                 except Exception:
                     self.err('stroke-snap', traceback.format_exc())
                 self.paint_dirty = True
-                if layer == 'mask':
-                    self.send_rect_m = _union(self.send_rect_m, bbox)
-                else:
-                    self.send_rect = _union(self.send_rect, bbox)
+                self.send_rect[layer] = _union(self.send_rect[layer], bbox)
                 self._broadcast({'t': 'history', **self.history()})
             else:
                 self.log('мазок без своего снимка (рисовали в два потока) — undo пропущен')
@@ -1958,28 +2022,39 @@ class Runtime(object):
         атрибутов) и при несовпадении приводим к нужной.
         """
         if not isinstance(getattr(self, 'dab_pending', None), dict):
-            self.dab_pending = {'paint': [], 'mask': []}
-            self.dab_pending_rect = {'paint': None, 'mask': None}
-            self.dab_pending_mode = {'paint': 0.0, 'mask': 1.0}
+            self.dab_pending = dict((n, []) for n in BUFFERS)
+            self.dab_pending_rect = dict((n, None) for n in BUFFERS)
+            self.dab_pending_mode = dict((n, 0.0 if n == 'paint' else 1.0)
+                                        for n in BUFFERS)
             self.dab_ready = None
             self.dab_ready_rect = None
-        if not isinstance(getattr(self, 'paint_rect', None), dict):
-            self.paint_rect = {'paint': None, 'mask': None}
-        for name, want in (('frame_dabs_m', list()), ('frame_rect_m', None),
-                           ('send_rect_m', None), ('mask_filled', False),
-                           ('switch_layer', 'paint')):
+        # Буферов стало три: у объекта, пережившего автопересборку, словари могут
+        # быть ещё на два (или поля старой формы: frame_dabs_m, send_rect_m).
+        for name, want in (('dab_pending', list), ('dab_pending_rect', None),
+                           ('dab_pending_mode', 0.0), ('paint_rect', None),
+                           ('send_rect', None), ('frame_dabs', list),
+                           ('frame_rect', None), ('mask_filled', False)):
             cur = getattr(self, name, None)
-            if name == 'mask_filled':
-                if not isinstance(cur, bool):
-                    setattr(self, name, False)
-            elif name == 'switch_layer':
-                if cur not in ('paint', 'mask'):
-                    setattr(self, name, 'paint')
-            elif isinstance(want, list):
-                if not isinstance(cur, list):
-                    setattr(self, name, [])
-            elif not hasattr(self, name):
-                setattr(self, name, want)
+            if not isinstance(cur, dict) or sorted(cur) != sorted(
+                    BUFFERS if name != 'mask_filled' else MASK_BUFFERS):
+                if name == 'dab_pending' or name == 'frame_dabs':
+                    new = dict((n, (cur or {}).get(n) if isinstance(cur, dict) else None)
+                               or [] for n in BUFFERS)
+                elif name == 'dab_pending_mode':
+                    new = dict((n, (cur or {}).get(n, 0.0 if n == 'paint' else 1.0)
+                                if isinstance(cur, dict) else
+                                (0.0 if n == 'paint' else 1.0)) for n in BUFFERS)
+                elif name == 'mask_filled':
+                    new = dict((n, bool((cur or {}).get(n)) if isinstance(cur, dict)
+                                else False) for n in MASK_BUFFERS)
+                else:
+                    new = dict((n, (cur or {}).get(n) if isinstance(cur, dict) else None)
+                               for n in BUFFERS)
+                setattr(self, name, new)
+        for name, want in (('switch_layer', 'paint'),):
+            cur = getattr(self, name, None)
+            if cur not in BUFFERS:
+                setattr(self, name, 'paint')
         if not isinstance(getattr(self, 'tun', None), dict):
             self.tun = dict(DEFAULT_TUN)
         for name, want in (('autostart_done', False), ('_fit_key', None)):
@@ -2011,7 +2086,8 @@ class Runtime(object):
             sig = ''
         if sig and sig != getattr(self, '_mask_sig', None):
             self._mask_sig = sig
-            self.mask_filled = False
+            for name in MASK_BUFFERS:
+                self.mask_filled[name] = False
             self.diag['mask_fill'] = 'после сборки %s' % sig
 
     def on_frame_start(self, frame):
@@ -2066,15 +2142,18 @@ class Runtime(object):
             ended = self._finish_strokes()
             # Изменённое в этом кадре забираем в область патча: рисование должно
             # доезжать до браузера кадр за кадром, а не одним куском в конце мазка.
-            for key, attr in (('paint', 'send_rect'), ('mask', 'send_rect_m')):
+            for key in BUFFERS:
                 box = self.paint_rect[key]
                 if box:
-                    setattr(self, attr, _union(getattr(self, attr), box))
+                    self.send_rect[key] = _union(self.send_rect[key], box)
                     self.paint_rect[key] = None
             # Режим отправки: патчи областями (по умолчанию) или целый кадр.
+            # Маски едут патчами всегда: они меняются редко и небольшими
+            # областями, а целый кадр маски — лишние сотни килобайт на движение.
             if self.tun.get('patchmode') == 'fullframe':
                 self._flush_fullframe()
-                self._flush_mask_patches()      # маска едет патчами всегда
+                for name in MASK_BUFFERS:
+                    self._flush_one_patch(name, self.send_rect.get(name))
             else:
                 self._flush_patches(force_final=bool(ended))
             self._flush_proxy()
@@ -2095,15 +2174,13 @@ class Runtime(object):
                 self.write_report('live', quiet=True)
         except Exception:
             self.err('frameEnd', traceback.format_exc())
-        self.frame_dabs = []
-        self.frame_rect = None
-        self.frame_dabs_m = []
-        self.frame_rect_m = None
+        for name in BUFFERS:
+            self.frame_dabs[name] = []
+            self.frame_rect[name] = None
         self.clear_frames = 0
         if self.switch_until >= frame:
             self.switch_until = -1
-            sw = self.try_o('swm' if getattr(self, 'switch_layer', 'paint') == 'mask'
-                            else 'sw')
+            sw = self.bo(self.switch_layer, 'sw')
             if sw is not None:
                 try:
                     sw.par.index = 0
@@ -2128,14 +2205,15 @@ class Runtime(object):
         Оба варианта означают одно и то же (предыдущий кадр слоя), но разные
         сборки TD используют то один, то другой механизм.
         """
-        for fb_rel, holder_rel in (('fb', 'buf'), ('fbm', 'bufm')):
-            self._ensure_loop(fb_rel, holder_rel)
+        for name in BUFFERS:
+            self._ensure_loop(self.bn(name, 'fb'), self.bn(name, 'buf'))
 
     def _ensure_loop(self, fb_rel, holder_rel):
         """Проверить и, если надо, восстановить одну петлю обратной связи.
 
-        Их две: слой краски (fb -> buf) и слой маски (fbm -> bufm). Правило
-        одинаковое для обеих, поэтому проверка вынесена в один метод.
+        Их три: слой краски (fb -> buf), маска источника (fbm -> bufm) и маска
+        слоя цвета (fbm2 -> bufm2). Правило одинаковое для всех, поэтому проверка
+        вынесена в один метод.
         """
         fb = self.try_o(fb_rel)
         buf = self.try_o(holder_rel)
@@ -2179,9 +2257,14 @@ class Runtime(object):
             return
         self.sizes = size
         W, H = size
-        for rel in ('brush', 'restore', 'buf', 'fit',
-                    'brushm', 'restorem', 'bufm', 'maskapply',
-                    'over'):
+        rels = ['fit', 'maskapply', 'colapply', 'over']
+        for name in BUFFERS:
+            # levelTOP в список не входит: своего разрешения у него нет, он идёт
+            # за входом — попытка выставить ему outputresolution только сыпет
+            # ошибками в отчёт.
+            rels += [self.bn(name, 'brush'), self.bn(name, 'restore'),
+                     self.bn(name, 'buf')]
+        for rel in rels:
             o = self.try_o(rel)
             if o is None:
                 continue
@@ -2224,6 +2307,7 @@ class Runtime(object):
                 with self.mu:
                     for st in self.clients.values():
                         st['need_poster'] = True
+                        st['sync_queue'] = list(SYNC_ORDER)
                 self.next_proxy_t = 0.0
                 self.log('вставка источника: %s' % FIT_MODES[i][1])
                 return True
@@ -2329,14 +2413,11 @@ class Runtime(object):
         clear = 1.0 if self.clear_frames else 0.0
 
         # --- доставка штампов: запись в текстуру и рисование в РАЗНЫХ кадрах ---
-        if self.frame_dabs:
-            self.dab_pending['paint'].extend(self.frame_dabs)
-            self.dab_pending_rect['paint'] = _union(self.dab_pending_rect['paint'],
-                                                   self.frame_rect)
-        if self.frame_dabs_m:
-            self.dab_pending['mask'].extend(self.frame_dabs_m)
-            self.dab_pending_rect['mask'] = _union(self.dab_pending_rect['mask'],
-                                                  self.frame_rect_m)
+        for name in BUFFERS:
+            if self.frame_dabs[name]:
+                self.dab_pending[name].extend(self.frame_dabs[name])
+                self.dab_pending_rect[name] = _union(self.dab_pending_rect[name],
+                                                     self.frame_rect[name])
 
         target, n, mode, rect_box = None, 0, 0.0, None
         if self.switch_until >= self.frame:
@@ -2350,20 +2431,22 @@ class Runtime(object):
             rect_box = self.dab_ready_rect
             self.dab_ready = None
             self.dab_ready_rect = None
-        elif self.dab_pending['paint'] or self.dab_pending['mask']:
-            # пачки нет — отправляем накопленное в текстуру; рисуем следующим кадром
-            target = 'paint' if self.dab_pending['paint'] else 'mask'
-            batch = self.dab_pending[target]
-            box = self.dab_pending_rect[target]
-            mode = self.dab_pending_mode[target]
-            self.dab_pending[target] = []
-            self.dab_pending_rect[target] = None
-            self.push_dabs(batch)
-            if self.diag.get('dab_png'):
-                self.dab_ready = (target, len(batch), mode)
-                self.dab_ready_rect = box
-            target, n, mode = None, 0, 0.0
-            rect_box = None
+        else:
+            waiting = [name for name in BUFFERS if self.dab_pending[name]]
+            if waiting:
+                # пачки нет — отправляем накопленное в текстуру; рисуем следующим кадром
+                target = waiting[0]
+                batch = self.dab_pending[target]
+                box = self.dab_pending_rect[target]
+                mode = self.dab_pending_mode[target]
+                self.dab_pending[target] = []
+                self.dab_pending_rect[target] = None
+                self.push_dabs(batch)
+                if self.diag.get('dab_png'):
+                    self.dab_ready = (target, len(batch), mode)
+                    self.dab_ready_rect = box
+                target, n, mode = None, 0, 0.0
+                rect_box = None
 
         self.diag['dab_count'] = n
         self.diag['dab_target'] = target or '-'
@@ -2371,42 +2454,41 @@ class Runtime(object):
         # 2 ластик). Раньше этого поля не было, и «ластик рисует как кисть»
         # приходилось искать вслепую.
         self.diag['dab_mode'] = mode if target else 0.0
-        self.diag['dab_pending'] = (len(self.dab_pending['paint'])
-                                    + len(self.dab_pending['mask']))
+        self.diag['dab_pending'] = sum(len(v) for v in self.dab_pending.values())
         self.diag['dab_clear'] = clear
         # Что в этом кадре реально изменилось в слое — это и есть область для патча.
         # Без этого патчи уходили только по концу мазка: браузер показывал линию
         # лишь после отпускания, а ластик выглядел «не работающим до отпускания».
-        if n > 0 and rect_box:
-            layer_of = 'mask' if target == 'mask' else 'paint'
-            self.paint_rect[layer_of] = _union(self.paint_rect[layer_of], rect_box)
+        if n > 0 and rect_box and target in self.paint_rect:
+            self.paint_rect[target] = _union(self.paint_rect[target], rect_box)
             self.paint_dirty = True
 
-        # Кисть рисует только одну пачку за кадр: вторая получает uCount = 0 и
-        # просто копирует свой предыдущий кадр (шейдер так и устроен).
-        n_paint = n if target == 'paint' else 0
-        n_mask = n if target == 'mask' else 0
-        self._vec(br, 0, 'uRes', (W, H * hsign, 1.0 / W, 1.0 / H))
-        self._vec(br, 1, 'uCount', (n_paint,
-                                    2.0 if (target == 'paint' and mode >= 1.5) else 0.0,
-                                    clear, 1.0))
-        self._vec(br, 2, 'uColor', (r, g, b, 1.0))
-        self._vec(br, 3, 'uRect', self._rect_arg(rect_box))
-
-        # Слой маски. Он всегда залит белым, пока маску не стирали: источник по
-        # умолчанию виден целиком, а ластик по слою «Источник» его прячет.
-        brm = self.try_o('brushm')
-        if brm is not None:
-            fill = 2.0 if not self.mask_filled else 0.0
-            self._vec(brm, 0, 'uRes', (W, H * hsign, 1.0 / W, 1.0 / H))
-            self._vec(brm, 1, 'uCount', (n_mask,
-                                         2.0 if (target == 'mask' and mode >= 1.5) else 1.0,
-                                         fill, 1.0))
-            self._vec(brm, 2, 'uColor', (1.0, 1.0, 1.0, 1.0))
-            self._vec(brm, 3, 'uRect',
-                      self._rect_arg(rect_box if target == 'mask' else None))
-            if fill > 0.5:
-                self.mask_filled = True
+        # Штампы одной пачки рисует только её кисть: все остальные получают
+        # uCount = 0 и просто копируют свой предыдущий кадр (шейдер так и устроен).
+        # Маски при этом ещё и заливаются белым, пока их не стирали: и источник,
+        # и цвет по умолчанию видны целиком.
+        for name in BUFFERS:
+            bru = self.try_o(self.bn(name, 'brush'))
+            if bru is None:
+                continue
+            mine = (target == name)
+            n_this = n if mine else 0
+            if name == 'paint':
+                extra = 2.0 if (mine and mode >= 1.5) else 0.0
+                # Третий компонент uCount — «очистить слой»: им пользуется
+                # кнопка «Очистить» (clear_frames).
+                fill = clear
+                color = (r, g, b, 1.0)
+            else:
+                extra = 2.0 if (mine and mode >= 1.5) else 1.0
+                fill = 0.0 if self.mask_filled.get(name) else 2.0
+                color = (1.0, 1.0, 1.0, 1.0)
+            self._vec(bru, 0, 'uRes', (W, H * hsign, 1.0 / W, 1.0 / H))
+            self._vec(bru, 1, 'uCount', (n_this, extra, fill, 1.0))
+            self._vec(bru, 2, 'uColor', color)
+            self._vec(bru, 3, 'uRect', self._rect_arg(rect_box if mine else None))
+            if fill > 0.5 and name in self.mask_filled:
+                self.mask_filled[name] = True
 
     def _rect_arg(self, rect_box):
         """Коробка (l, t, r, b) -> (x, y, w, h) для uRect шейдера."""
@@ -2438,7 +2520,11 @@ class Runtime(object):
         self._compose_key = key
         for rel, par, val in (('src_level', 'opacity', src_mul),
                               ('paint_level', 'opacity', paint_mul),
-                              ('mask_level', 'opacity', mask_mul)):
+                              (BUFFER_LEVEL['mask'], 'opacity', mask_mul),
+                              # У маски слоя цвета своего ползунка интенсивности нет:
+                              # её роль играет интенсивность самого слоя цвета
+                              # (Colorint), поэтому здесь всегда 1.0.
+                              (BUFFER_LEVEL['colormask'], 'opacity', 1.0)):
             o = self.try_o(rel)
             if o is None:
                 continue
@@ -2466,12 +2552,14 @@ class Runtime(object):
         """
         req = self.restore_req
         layer = req.get('layer', 'paint') if req else 'paint'
-        sw = self.try_o('swm' if layer == 'mask' else 'sw')
+        if layer not in BUFFERS:
+            layer = 'paint'
+        sw = self.bo(layer, 'sw')
         if req is None or sw is None:
             return
         if frame <= req['frame']:
             return                                  # даём кадр на загрузку файла патча
-        mv = self.try_o('patchinm' if layer == 'mask' else 'patchin')
+        mv = self.bo(layer, 'patchin')
         l, tp, w, h = _rect_int(req['rect'], int(self.tun['w']), int(self.tun['h']))
         if mv is not None:
             try:
@@ -2489,7 +2577,7 @@ class Runtime(object):
                     self._broadcast({'t': 'error',
                                      'msg': 'Не удалось восстановить область (файл патча)'})
                 return
-        r = self.try_o('restorem' if layer == 'mask' else 'restore')
+        r = self.bo(layer, 'restore')
         if r is not None:
             W = float(self.tun['w'])
             H = float(self.tun['h'])
@@ -2502,15 +2590,12 @@ class Runtime(object):
             self.err('sw', traceback.format_exc())
         self.switch_until = frame
         self.switch_layer = layer
-        if layer == 'mask':
-            self.send_rect_m = _union(self.send_rect_m, (l, tp, l + w, tp + h))
-        else:
-            self.send_rect = _union(self.send_rect, (l, tp, l + w, tp + h))
+        self.send_rect[layer] = _union(self.send_rect[layer], (l, tp, l + w, tp + h))
         self.force_patch = True
         self.restore_req = None
 
     def _load_patch(self, path, layer='paint'):
-        mv = self.try_o('patchinm' if layer == 'mask' else 'patchin')
+        mv = self.bo(layer, 'patchin')
         if mv is None:
             return
         try:
@@ -2533,7 +2618,7 @@ class Runtime(object):
             l, tp, w, h = 0, 0, W, H
         else:
             l, tp, w, h = _rect_int(rect, W, H)
-        crop = self.o('cropm' if layer == 'mask' else 'crop')
+        crop = self.o(self.bn(layer, 'crop'))
         # В _set_crop прямоугольник — это КОРОБКА (l, t, r, b), а _rect_int выше
         # вернул (l, t, w, h). Раньше сюда уходило (l, tp, w, h) — и _set_crop
         # считал правый край равным ШИРИНЕ: область выходила размером (w - l,
@@ -2545,9 +2630,9 @@ class Runtime(object):
         # В браузер уходит STRAIGHT alpha: слой в TD премультиплицирован, а
         # drawImage домножил бы RGB на альфу второй раз (мягкие края мазка
         # темнели бы). Снимаем премульт отдельным шейдером — так картинка на
-        # планшете совпадает с тем, что видно в TD. Для маски это не нужно: она
-        # и так белая, а клиент берёт из неё только альфу.
-        src = crop if layer == 'mask' else (self.try_o('unpremult') or crop)
+        # планшете совпадает с тем, что видно в TD. Маскам это не нужно: они
+        # белые, а клиент берёт из них только альфу.
+        src = (self.try_o('unpremult') or crop) if layer == 'paint' else crop
         try:
             src.cook(force=True)
         except Exception:
@@ -2575,7 +2660,7 @@ class Runtime(object):
         сотни килобайт, поэтому частота ограничена, а формат можно переключить на
         JPEG (меньше и быстрее, но с потерями на краях мазка).
         """
-        if not self.paint_dirty or not self.send_rect:
+        if not self.paint_dirty or not self.send_rect.get('paint'):
             return
         clients = self._ready_clients()
         if not clients:
@@ -2604,28 +2689,22 @@ class Runtime(object):
         self.diag['fullframes'] = self.diag.get('fullframes', 0) + 1
         self.last_patch_t = now
         self.paint_dirty = False
-        self.send_rect = None
+        self.send_rect['paint'] = None
 
     def _flush_patches(self, force_final=False):
-        self._flush_one_patch('paint', self.send_rect, force_final)
-        self._flush_mask_patches(force_final)
-
-    def _flush_mask_patches(self, force_final=False):
-        """Патчи слоя маски. Маска едет патчами даже в режиме «целый кадр»:
-        она меняется редко и небольшими областями, а целый кадр маски в браузер
-        — это лишние сотни килобайт на каждое движение кисти."""
-        self._flush_one_patch('mask', self.send_rect_m, force_final)
+        # Патчи уходят по каждому буферу отдельно: маски (обе) меняются редко и
+        # небольшими областями, а целый кадр в браузер — лишние сотни килобайт.
+        for name in BUFFERS:
+            self._flush_one_patch(name, self.send_rect.get(name), force_final)
 
     def _flush_one_patch(self, layer, rect, force_final=False):
         if rect is None:
             return
         clients = self._ready_clients()
         if not clients:
+            self.send_rect[layer] = None
             if layer == 'paint':
-                self.send_rect = None
                 self.force_patch = False
-            else:
-                self.send_rect_m = None
             return
         now = time.time()
         due = (now - self.last_patch_t) >= (1.0 / max(1.0, self.tun['patchhz']))
@@ -2636,19 +2715,16 @@ class Runtime(object):
             dump = None
             if force_final or self.force_patch:
                 dump = os.path.join(dirs.get('tmp') or '',
-                                    'patch_mask_last.png' if layer == 'mask'
-                                    else 'patch_last.png')
+                                    PATCH_DUMP.get(layer, 'patch_%s_last.png' % layer))
             png, (l, tp, w, h) = self._encode_layer(rect, '.png', dump, layer)
         except Exception:
             self.err('patch-encode', traceback.format_exc())
+            self.send_rect[layer] = None
             if layer == 'paint':
-                self.send_rect = None
                 self.force_patch = False
-            else:
-                self.send_rect_m = None
             return
         self.seq += 1
-        head = {'t': 'patch', 'layer': 1 if layer == 'paint' else 2,
+        head = {'t': 'patch', 'layer': BUFFER_WIRE.get(layer, 1),
                 'x': l, 'y': tp, 'w': w, 'h': h, 'seq': self.seq,
                 'final': 1 if (self.force_patch or force_final) else 0}
         for c in clients:
@@ -2658,51 +2734,47 @@ class Runtime(object):
                 st['patches'] = st.get('patches', 0) + 1
         self.diag['patches'] += 1
         self.last_patch_t = now
+        self.send_rect[layer] = None
         if layer == 'paint':
-            self.send_rect = None
             self.force_patch = False
-        else:
-            self.send_rect_m = None
 
     def _flush_sync(self):
         with self.mu:
-            pending = [c for c, st in self.clients.items()
-                       if st.get('need_sync') or st.get('need_sync_mask')]
+            pending = [c for c, st in self.clients.items() if st.get('sync_queue')]
         if not pending:
             return
         c = pending[0]                              # по одному клиенту за кадр
         st = self.clients.get(c) or {}
-        # Синхронизация идёт двумя шагами: сначала слой краски, следующим кадром —
-        # маска. Иначе браузер показал бы источник без маски, а потом «моргнул».
-        layer = 'mask' if (st.get('need_sync_mask') and not st.get('need_sync')) else 'paint'
+        queue = [int(x) for x in (st.get('sync_queue') or [])]
+        if not queue:
+            return
+        # Очередь слоёв: сначала краска, потом маски (источника и цвета) — иначе
+        # браузер показал бы картинку без маски, а потом «моргнул».
+        wire = queue[0]
+        layer = BUFFER_BY_WIRE.get(wire, 'paint')
         W, H = int(self.tun['w']), int(self.tun['h'])
         try:
             dirs = self.dirs()
             dump = os.path.join(dirs.get('tmp') or '',
-                                'sync_mask_last.png' if layer == 'mask'
-                                else 'sync_last.png')
+                                SYNC_DUMP.get(layer, 'sync_%s_last.png' % layer))
             png, _rect = self._encode_layer(None, '.png', dump, layer)
         except Exception:
             self.err('sync-encode', traceback.format_exc())
             with self.mu:
                 if c in self.clients:
-                    self.clients[c]['need_sync'] = False
-                    self.clients[c]['need_sync_mask'] = False
+                    self.clients[c]['sync_queue'] = []
             return
         self.seq += 1
-        self._send_bin(c, {'t': 'sync', 'layer': 1 if layer == 'paint' else 2,
-                           'seq': self.seq, 'w': W, 'h': H}, png)
+        self._send_bin(c, {'t': 'sync', 'layer': wire, 'seq': self.seq,
+                           'w': W, 'h': H}, png)
         with self.mu:
             if c in self.clients:
-                if layer == 'paint' and self.clients[c].get('need_sync'):
-                    self.clients[c]['need_sync'] = False
-                    self.clients[c]['need_sync_mask'] = True
-                else:
-                    self.clients[c]['need_sync'] = False
-                    self.clients[c]['need_sync_mask'] = False
-            if c in self.clients:
-                self.clients[c]['need_sync'] = False
-        self.log('полная выгрузка слоя для %s (%dx%d)' % (c, W, H))
+                q = [int(x) for x in (self.clients[c].get('sync_queue') or [])]
+                if q and q[0] == wire:
+                    q.pop(0)
+                self.clients[c]['sync_queue'] = q
+        self.log('полная выгрузка слоя %s для %s (%dx%d)'
+                 % (BUFFER_TITLE.get(layer, layer), c, W, H))
 
     def _flush_proxy(self):
         """Отправить клиентам картинку источника (постер) и/или живой прокси.
@@ -2828,6 +2900,19 @@ class Runtime(object):
                    'cropleftunit', 'outputresolution', 'format')),
         ('cropsnapm', ('cropleft', 'cropright', 'croptop', 'cropbottom')),
         ('patchinm', ('file', 'play')),
+        # Вторая маска (слой цвета): своя петля, свой undo, свой патч-вход.
+        ('fbm2', ('top', 'format')),
+        ('brushm2', ('format', 'outputresolution', 'resolutionw', 'resolutionh',
+                     'pixeldat')),
+        ('restorem2', ('format', 'outputresolution', 'pixeldat')),
+        ('swm2', ('index', 'format')),
+        ('bufm2', ('format',)),
+        ('snapm2', ('format',)),
+        ('cropm2', ('cropleft', 'cropright', 'croptop', 'cropbottom',
+                    'cropleftunit', 'format')),
+        ('cropsnapm2', ('cropleft', 'cropright', 'croptop', 'cropbottom')),
+        ('patchinm2', ('file', 'play')),
+        ('maskc_level', ('opacity',)),
         ('src_level', ('opacity',)),
         ('paint_level', ('opacity',)),
         ('maskapply', ('format', 'outputresolution', 'resolutionw', 'resolutionh',
@@ -2935,7 +3020,7 @@ class Runtime(object):
         """
         if self.snap_depth > 0:
             return False                      # уже снимаем для другого мазка
-        s = self.try_o('snapm' if layer == 'mask' else 'snap')
+        s = self.bo(layer, 'snap')
         if s is None:
             return False
         try:

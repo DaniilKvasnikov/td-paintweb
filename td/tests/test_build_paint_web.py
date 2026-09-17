@@ -591,7 +591,7 @@ def _integration(base, paint_dir):
     sent = []
     rt._send = lambda c, o: (sent.append(('text', o)) or True)
     rt._send_bin = lambda c, h, b: (sent.append((h, len(b))) or True)
-    rt.clients['t'] = {'ready': True, 'need_poster': False, 'need_sync': False}
+    rt.clients['t'] = {'ready': True, 'need_poster': False, 'sync_queue': []}
 
     # Кадры дёргаем через НАСТОЯЩИЙ DAT executeDAT (`tick`), как это делает TD:
     # исполняется тот же код с тем же загрузчиком, а не методы рантайма напрямую.
@@ -706,7 +706,7 @@ def _integration(base, paint_dir):
           rt.tun.get('patchmode') == 'fullframe', rt.tun.get('patchmode'))
     sent[:] = []
     rt.paint_dirty = True
-    rt.send_rect = (0, 0, 1920, 1080)
+    rt.send_rect['paint'] = (0, 0, 1920, 1080)
     rt.last_patch_t = 0.0
     frames(1, 200)
     heads = [s[0] for s in sent if isinstance(s, tuple) and isinstance(s[0], dict)]
@@ -798,9 +798,9 @@ def _integration(base, paint_dir):
           rep['ops']['crop']['pars'].get('cropleftunit') == 'pixels',
           rep['ops']['crop']['pars'])
     check('в отчёте есть счётчик ошибок', 'errors_total' in rep)
-    check('в отчёте перечислены слои (источник, цвет, краска, буфер маски)',
+    check('в отчёте перечислены слои (источник, цвет, краска, две маски)',
           [l['kind'] for l in rep.get('layers', [])] == ['source', 'color', 'paint',
-                                                         'mask'],
+                                                         'mask', 'mask'],
           rep.get('layers'))
     # HTTP-эндпоинт отдаёт тот же отчёт
     resp = {}

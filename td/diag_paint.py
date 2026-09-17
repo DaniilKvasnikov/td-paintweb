@@ -204,7 +204,7 @@ def main():
     rt._send_bin = fake_send_bin
     with rt.mu:
         rt.clients['diag'] = {'w': 800, 'h': 600, 'dpr': 1.0, 'ready': True,
-                              'need_poster': False, 'need_sync': False,
+                              'need_poster': False, 'sync_queue': [],
                               'last_patch': 0.0, 'patches': 0, 'since': time.time()}
 
     # --- следим, что именно строит _build_dabs ---
@@ -214,11 +214,11 @@ def main():
 
     def spy_build():
         orig_build()
-        if rt.frame_dabs:
-            seen['cur_dabs'] = list(rt.frame_dabs)
-            seen['cur_rect'] = rt.frame_rect
-            seen['last_dabs'] = list(rt.frame_dabs)
-            seen['last_rect'] = rt.frame_rect
+        if rt.frame_dabs['paint']:
+            seen['cur_dabs'] = list(rt.frame_dabs['paint'])
+            seen['cur_rect'] = rt.frame_rect['paint']
+            seen['last_dabs'] = list(rt.frame_dabs['paint'])
+            seen['last_rect'] = rt.frame_rect['paint']
 
     rt._build_dabs = spy_build
 
@@ -344,13 +344,13 @@ def main():
 
             # A. как в рантайме: записать текстуру и нарисовать в том же кадре
             def cook_a():
-                rt.frame_dabs = list(batch)
-                rt.frame_rect = rect_rt
+                rt.frame_dabs['paint'] = list(batch)
+                rt.frame_rect['paint'] = rect_rt
                 rt.push_dabs()
                 set_uniforms(n, urt)
                 out.cook(force=True)
-                rt.frame_dabs = []
-                rt.frame_rect = None
+                rt.frame_dabs['paint'] = []
+                rt.frame_rect['paint'] = None
                 return sample_at(buf)
 
             res_a = clean_and_report('A: запись текстуры + кадр', cook_a)
@@ -404,18 +404,16 @@ def main():
             # Форма полей — как в рантайме: здесь стоял список вместо словаря по
             # слоям, диагностика портила состояние живого рантайма, и кадры потом
             # падали с «list indices must be integers, not str».
-            rt.dab_pending = {'paint': [], 'mask': []}
-            rt.dab_pending_rect = {'paint': None, 'mask': None}
-            rt.dab_pending_mode = {'paint': 0.0, 'mask': 1.0}
+            rt.dab_pending = dict((n, []) for n in rt.BUFFERS)
+            rt.dab_pending_rect = dict((n, None) for n in rt.BUFFERS)
+            rt.dab_pending_mode = dict((n, 0.0 if n == 'paint' else 1.0)
+                                       for n in rt.BUFFERS)
             rt.dab_ready = None
             rt.dab_ready_rect = None
-            rt.paint_rect = {'paint': None, 'mask': None}
-            rt.frame_dabs = []
-            rt.frame_rect = None
-            rt.frame_dabs_m = []
-            rt.frame_rect_m = None
-            rt.send_rect = None
-            rt.send_rect_m = None
+            rt.paint_rect = dict((n, None) for n in rt.BUFFERS)
+            rt.frame_dabs = dict((n, []) for n in rt.BUFFERS)
+            rt.frame_rect = dict((n, None) for n in rt.BUFFERS)
+            rt.send_rect = dict((n, None) for n in rt.BUFFERS)
             rt.force_patch = False
             rt.frame = saved_frame
             if sw is not None:

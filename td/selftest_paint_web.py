@@ -446,7 +446,7 @@ def main():
     rt._send_bin = fake_send_bin
     with rt.mu:
         rt.clients['selftest'] = {'w': 800, 'h': 600, 'dpr': 1.0, 'ready': True,
-                                  'need_poster': False, 'need_sync': False,
+                                  'need_poster': False, 'sync_queue': [],
                                   'last_patch': 0.0, 'patches': 0, 'since': time.time()}
 
     # Папки берём у рантайма: он умеет находить их и при пустом Datadir.
@@ -491,7 +491,7 @@ def main():
         set_flipy(base, flipy)
         rt.read_pars()
         rt.clients['selftest']['need_poster'] = False
-        rt.clients['selftest']['need_sync'] = False
+        rt.clients['selftest']['sync_queue'] = []
         f = 1000
         rt._cmd_clear()
         force_frames(rt, base, 2, f)
@@ -700,7 +700,7 @@ def main():
         # (в форсированных кадрах следующий кадр копирует пустое «предыдущее»,
         # поэтому позже буфер уже пуст — см. force_frames).
         fill_probe = {}
-        rt.mask_filled = False
+        rt.mask_filled = dict((n, False) for n in rt.MASK_BUFFERS)
 
         def hook_fill(step, o):
             if fill_probe or step > 1:

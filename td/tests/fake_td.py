@@ -741,6 +741,19 @@ def build_tree(paint_dir):
         FakeOp(P + '/' + n, 'cropTOP')
     maskapply = FakeOp(P + '/maskapply', 'glslmultiTOP')
 
+    # Третий буфер — маска СЛОЯ ЦВЕТА: у неё своя петля и своя кисть, потому что
+    # маски источника и цвета разные.
+    fbm2 = FakeOp(P + '/fbm2', 'feedbackTOP')
+    brushm2 = FakeOp(P + '/brushm2', 'glslmultiTOP')
+    restm2 = FakeOp(P + '/restorem2', 'glslmultiTOP')
+    patchinm2 = FakeOp(P + '/patchinm2', 'moviefileinTOP')
+    swm2 = FakeOp(P + '/swm2', 'switchTOP')
+    bufm2 = FakeOp(P + '/bufm2', 'nullTOP')
+    snapm2 = FakeOp(P + '/snapm2', 'nullTOP')
+    for n in ('cropm2', 'cropsnapm2'):
+        FakeOp(P + '/' + n, 'cropTOP')
+    maskc_level = FakeOp(P + '/maskc_level', 'levelTOP')
+
     gc = FakeOp(P + '/mode', 'switchTOP')
     FakeOp(P + '/src_level', 'levelTOP')
     FakeOp(P + '/paint_level', 'levelTOP')
@@ -753,6 +766,7 @@ def build_tree(paint_dir):
     FakeOp(P + '/out', 'outTOP')
     outpaint = FakeOp(P + '/outpaint', 'outTOP')
     outmask = FakeOp(P + '/outmask', 'outTOP')
+    outcmask = FakeOp(P + '/outcmask', 'outTOP')
 
     # параметры базового компонента
     base.par = Pars(
@@ -773,7 +787,8 @@ def build_tree(paint_dir):
     # меню-параметры как в реальном TD
     UNITS = ['fraction', 'pixels', 'nativeres']
     RES = ['useinput', 'custom', 'pixel', 'natural']
-    for o in (brush, rest, gc, fit, brushm, restm, maskapply):
+    for o in (brush, rest, gc, fit, brushm, restm, brushm2, restm2, maskapply,
+              colapply):
         o.par = Pars(outputresolution=Par('outputresolution', 'useinput', RES),
                      resolutionw=Par('resolutionw', 1280),
                      resolutionh=Par('resolutionh', 720))
@@ -794,7 +809,8 @@ def build_tree(paint_dir):
     fit.par._d['fit'].menuLabels = FIT_LABELS      # подписи отличаются от имён
     fit.par._d['justifyh'] = Par('justifyh', 'center', JUSTIFY)
     fit.par._d['justifyv'] = Par('justifyv', 'center', JUSTIFY)
-    for n in ('crop', 'cropundo', 'cropsnap', 'cropm', 'cropsnapm'):
+    for n in ('crop', 'cropundo', 'cropsnap', 'cropm', 'cropsnapm', 'cropm2',
+              'cropsnapm2'):
         o = FakeOp.REG[P + '/' + n]
         o.par = Pars(
             cropleft=Par('cropleft', 0.0), cropleftunit=Par('cropleftunit', 'fraction', UNITS),
@@ -805,26 +821,32 @@ def build_tree(paint_dir):
     sw.par = Pars(index=Par('index', 0), format=Par('format', 'rgba8', ['rgba8', 'rgba16float']))
     swm.par = Pars(index=Par('index', 0),
                    format=Par('format', 'rgba8', ['rgba8', 'rgba16float']))
+    swm2.par = Pars(index=Par('index', 0),
+                    format=Par('format', 'rgba8', ['rgba8', 'rgba16float']))
     # switchTOP в живом TD умеет своё разрешение — рантайм это использует
     gc.par = Pars(index=Par('index', 0),
                   outputresolution=Par('outputresolution', 'useinput', RES),
                   resolutionw=Par('resolutionw', 1280),
                   resolutionh=Par('resolutionh', 720))
-    for rel in ('src_level', 'paint_level', 'mask_level'):
+    for rel in ('src_level', 'paint_level', 'mask_level', 'maskc_level'):
         FakeOp.REG[P + '/' + rel].par = Pars(opacity=Par('opacity', 1.0))
     color_src.par = Pars(colorr=Par('colorr', 1.0), colorg=Par('colorg', 1.0),
                         colorb=Par('colorb', 1.0), alpha=Par('alpha', 1.0))
     snap.par = Pars()
     snapm.par = Pars()
+    snapm2.par = Pars()
     sel.par = Pars(index=Par('index', 0))
     # selectTOP внешнего источника: путь к TOP задаётся параметром Top
     FakeOp.REG[P + '/ext'].par = Pars(top=Par('top', ''))
     fb.par = Pars(top=Par('top', ''))
     fbm.par = Pars(top=Par('top', ''))
+    fbm2.par = Pars(top=Par('top', ''))
     patchin.par = Pars(file=Par('file', ''), reloadpulse=Par('reloadpulse', None),
                        play=Par('play', 0))
     patchinm.par = Pars(file=Par('file', ''), reloadpulse=Par('reloadpulse', None),
                         play=Par('play', 0))
+    patchinm2.par = Pars(file=Par('file', ''), reloadpulse=Par('reloadpulse', None),
+                         play=Par('play', 0))
     ws.par = Pars(port=Par('port', 9980), active=Par('active', 1))
 
     # Связи: без них размеры в заглушке не распространяются по цепочке, и
@@ -852,14 +874,26 @@ def build_tree(paint_dir):
     wire(snapm, [bufm])
     wire(FakeOp.REG[P + '/cropm'], [bufm])
     wire(FakeOp.REG[P + '/cropsnapm'], [snapm])
+    # цепочка маски слоя цвета — второе зеркало цепочки краски
+    wire(brushm2, [fbm2, FakeOp.REG[P + '/dabpng']])
+    wire(restm2, [fbm2, patchinm2])
+    wire(fbm2, [bufm2])
+    wire(swm2, [brushm2, restm2])
+    wire(bufm2, [swm2])
+    wire(snapm2, [bufm2])
+    wire(FakeOp.REG[P + '/cropm2'], [bufm2])
+    wire(FakeOp.REG[P + '/cropsnapm2'], [snapm2])
+    wire(maskc_level, [bufm2])
     wire(FakeOp.REG[P + '/src_level'], [fit])
     wire(FakeOp.REG[P + '/paint_level'], [buf])
     wire(maskapply, [FakeOp.REG[P + '/src_level'], mask_level])
     wire(mask_level, [bufm])
-    wire(colapply, [color_src, mask_level])
+    # цвет проявляется СВОЕЙ маской, а не маской источника
+    wire(colapply, [color_src, maskc_level])
     wire(base_layer, [colapply, maskapply])
     wire(outpaint, [FakeOp.REG[P + '/paint_level']])
     wire(outmask, [mask_level])
+    wire(outcmask, [maskc_level])
     wire(FakeOp.REG[P + '/over'],
          [FakeOp.REG[P + '/paint_level'], base_layer])
     wire(FakeOp.REG[P + '/out1'], [FakeOp.REG[P + '/over']])

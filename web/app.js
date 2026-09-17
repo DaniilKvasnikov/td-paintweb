@@ -117,7 +117,7 @@ const surf = {
   paint: new Map(),       // layerId → { c, x }  (RGBA-слои от сервера)
   overlayLayerId: null,   // на каком слое нарисовано текущее превью
   overlayHasContent: false,
-  maskReady: false        // пиксели маски уже пришли от TD
+  maskReady: {}           // id маски → пиксели уже пришли от TD (маски разные!)
 };
 
 // Вид: экранные координаты в CSS-пикселях. screen = canvas * scale + t
@@ -456,6 +456,7 @@ function setCanvasSize(w, h) {
   surf.temp = makeSurface(nw, nh);
   surf.mask = makeSurface(nw, nh);
   surf.paint.clear();           // содержимое придёт заново через sync
+  surf.maskReady = {};          // маски тоже придут заново — и обе
   surf.overlayHasContent = false;
   surf.overlayLayerId = null;
   stampCache.clear();
@@ -579,12 +580,24 @@ function findMaskLayer() {
   return null;
 }
 
+/* Маска КОНКРЕТНОГО слоя. Маски теперь разные: у источника своя (id 2), у слоя
+   цвета своя (id 4), и сервер говорит, какая кому (поле usesMask). Раньше маска
+   была одна на всех, поэтому «стереть картинку» стирало и цвет. */
+function maskForLayer(L) {
+  if (!L) return null;
+  let mid = L.usesMask;
+  if (mid === undefined || mid === null) mid = (L.kind === 'source') ? 2 : null;
+  if (mid === null) return null;
+  const m = findLayer(mid);
+  if (!m || m.kind !== 'mask') return null;
+  return { layer: m, surf: paintSurface(m.id, false),
+           ready: !!surf.maskReady[String(m.id)] };
+}
+
 function drawLayers(vx) {
   const W = state.canvas.w;
   const H = state.canvas.h;
   const layers = state.layers;
-  const mask = findMaskLayer();
-  const maskSurf = mask ? paintSurface(mask.id, false) : null;
 
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
@@ -593,12 +606,13 @@ function drawLayers(vx) {
     if (opacity <= 0) continue;
 
     if (L.kind === 'source') {
-      // Источник рисуется один раз — с маской, если маска уже пришла. Пока её
-      // нет, показываем источник целиком: в TD маска при старте залита белым
+      // Источник рисуется один раз — со СВОЕЙ маской, если она уже пришла. Пока
+      // её нет, показываем источник целиком: в TD маска при старте залита белым
       // (источник виден весь), и пустая маска на странице дала бы чёрный холст.
+      const sm = maskForLayer(L);
       vx.globalAlpha = opacity;
-      if (maskSurf && surf.maskReady) {
-        drawMaskedSource(vx, maskSurf, opacity);
+      if (sm && sm.surf && sm.ready) {
+        drawMaskedSource(vx, sm.surf, opacity);
       } else {
         vx.drawImage(surf.source.c, 0, 0, W, H);
       }
@@ -607,10 +621,12 @@ function drawLayers(vx) {
     }
 
     if (L.kind === 'color') {
-      // Слой монотонного цвета: ровный цвет по температуре, обрезанный той же
-      // маской, что и источник (в TD это color_src + colapply). Пока маска не
-      // пришла, показываем цвет целиком — в TD маска при старте залита белым.
-      drawColorLayer(vx, maskSurf, L, opacity);
+      // Слой монотонного цвета: ровный цвет по температуре, обрезанный СВОЕЙ
+      // маской (в TD это color_src + colapply + maskc_level) — той же маской
+      // источник не режется, маски разные. Пока она не пришла, показываем цвет
+      // целиком: в TD маска при старте залита белым.
+      const cm = maskForLayer(L);
+      drawColorLayer(vx, cm ? cm.surf : null, cm ? cm.ready : false, L, opacity);
       continue;
     }
 
@@ -653,7 +669,7 @@ function drawMaskedSource(vx, maskSurf, opacity) {
 /* Слой монотонного цвета: залили прямоугольник цветом по температуре и оставили
    его только там, где маска (destination-in по альфе маски) — тот же приём, что
    у источника, поэтому картинка совпадает с TD. */
-function drawColorLayer(vx, maskSurf, L, opacity) {
+function drawColorLayer(vx, maskSurf, maskReady, L, opacity) {
   const W = state.canvas.w;
   const H = state.canvas.h;
   const tmp = surf.temp.x;
@@ -665,7 +681,7 @@ function drawColorLayer(vx, maskSurf, L, opacity) {
   tmp.clearRect(0, 0, W, H);
   tmp.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
   tmp.fillRect(0, 0, W, H);
-  if (maskSurf && surf.maskReady) {
+  if (maskSurf && maskReady) {
     tmp.globalCompositeOperation = 'destination-in';
     tmp.drawImage(maskSurf.c, 0, 0, W, H);
   }
@@ -1513,7 +1529,7 @@ function resolvePaintLayerId(id) {
    маска при старте залита белым), иначе до первого sync холст был бы чёрным. */
 function markMaskReady(id) {
   const L = findLayer(id);
-  if (L && L.kind === 'mask') surf.maskReady = true;
+  if (L && L.kind === 'mask') surf.maskReady[String(L.id)] = true;
 }
 
 function applyPatch(h, bmp) {

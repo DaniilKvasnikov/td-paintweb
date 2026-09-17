@@ -415,9 +415,20 @@ def check_pars(base):
         'patchinm': ('file', 'reloadpulse', 'play'),
         'cropm': ('cropleft', 'cropright', 'croptop', 'cropbottom', 'cropleftunit'),
         'cropsnapm': ('cropleft', 'cropright', 'croptop', 'cropbottom'),
+        # Маска слоя цвета — такая же цепочка, только со своими именами (суффикс 2).
+        'fbm2': ('top',),
+        'brushm2': ('pixeldat', 'vec0name', 'vec0valuex', 'vec0valuew',
+                    'outputresolution', 'resolutionw', 'resolutionh',
+                    'premultrgbbyalpha'),
+        'restorem2': ('pixeldat', 'vec0name', 'vec0valuew', 'outputresolution'),
+        'swm2': ('index',),
+        'patchinm2': ('file', 'reloadpulse', 'play'),
+        'cropm2': ('cropleft', 'cropright', 'croptop', 'cropbottom', 'cropleftunit'),
+        'cropsnapm2': ('cropleft', 'cropright', 'croptop', 'cropbottom'),
         'src_level': ('opacity',),
         'paint_level': ('opacity',),
         'mask_level': ('opacity',),
+        'maskc_level': ('opacity',),
         'color_src': ('colorr', 'colorg', 'colorb', 'alpha'),
         'colapply': ('pixeldat', 'outputresolution', 'resolutionw', 'resolutionh'),
         'maskapply': ('pixeldat', 'outputresolution'),
@@ -426,6 +437,7 @@ def check_pars(base):
         'out': (),
         'outpaint': (),
         'outmask': (),
+        'outcmask': (),
     }
     missing = 0
     # Нода кнопки необязательна: если в этой сборке TD parameterExecuteDAT не
@@ -615,6 +627,20 @@ def build():
     cropm = ensure(base, 'cropTOP', 'cropm')
     cropsnapm = ensure(base, 'cropTOP', 'cropsnapm')
 
+    # Третья цепочка — МАСКА СЛОЯ ЦВЕТА. Маски источника и цвета разные: то, что
+    # открыто для картинки, не обязано совпадать с тем, где виден цвет, и стирать
+    # их надо по отдельности. Устройство то же, что у маски источника (свой буфер,
+    # свой шейдер кисти, своё восстановление для undo, свой undo-стек в рантайме).
+    fbm2 = ensure(base, 'feedbackTOP', 'fbm2')
+    brushm2 = ensure(base, 'glslmultiTOP', 'brushm2')
+    restorem2 = ensure(base, 'glslmultiTOP', 'restorem2')
+    patchinm2 = ensure(base, 'moviefileinTOP', 'patchinm2')
+    swm2 = ensure(base, 'switchTOP', 'swm2')
+    bufm2 = ensure(base, 'nullTOP', 'bufm2')
+    snapm2 = ensure(base, 'nullTOP', 'snapm2')
+    cropm2 = ensure(base, 'cropTOP', 'cropm2')
+    cropsnapm2 = ensure(base, 'cropTOP', 'cropsnapm2')
+
     # Композит: источник, умноженный на маску, и краска поверх него. Раньше здесь
     # стояли levelTOP + multiplyTOP, но levelTOP не переносит альфу в RGB: маска
     # умножалась на константу, и в TouchDesigner картинка оставалась нетронутой
@@ -624,10 +650,13 @@ def build():
     # Интенсивность маски — своим уровнем: она уходит и в композит, и на
     # отдельный выход компонента.
     mask_level = ensure(base, 'levelTOP', 'mask_level')
+    # Интенсивность маски слоя цвета — своим уровнем (0..1 его задаёт рантайм:
+    # своего ползунка у этой маски нет, её роль играет интенсивность слоя цвета).
+    maskc_level = ensure(base, 'levelTOP', 'maskc_level')
     maskapply = ensure(base, 'glslmultiTOP', 'maskapply')
-    # Слой монотонного цвета, который проявляется ТОЙ ЖЕ маской: constantTOP даёт
-    # ровный цвет, а второй экземпляр шейдера маски умножает его на альфу маски.
-    # Цвет считает рантайм (в том числе по цветовой температуре).
+    # Слой монотонного цвета, который проявляется СВОЕЙ маской: constantTOP даёт
+    # ровный цвет, а colapply умножает его на альфу maskc_level. Цвет считает
+    # рантайм (в том числе по цветовой температуре).
     color_src = ensure(base, 'constantTOP', 'color_src')
     colapply = ensure(base, 'glslmultiTOP', 'colapply')
     base_layer = ensure(base, 'overTOP', 'base_layer')   # цвет поверх источника с маской
@@ -642,6 +671,9 @@ def build():
     # их напрямую, а не вырезать из композита. Каждый Out TOP — свой разъём.
     outpaint = ensure(base, 'outTOP', 'outpaint')
     outmask = ensure(base, 'outTOP', 'outmask')
+    # И маска слоя цвета — тоже отдельным выходом: масок теперь две, и брать их
+    # из композита по одной было бы нельзя.
+    outcmask = ensure(base, 'outTOP', 'outcmask')
 
     sh_paint = ensure(shaders, 'textDAT', 'paint')
     sh_rest = ensure(shaders, 'textDAT', 'restore')
@@ -723,12 +755,22 @@ def build():
     set_inputs(snapm, [bufm])
     set_inputs(cropm, [bufm])
     set_inputs(cropsnapm, [snapm])
+    # Третья цепочка — маска слоя цвета (устройство то же, что у маски источника).
+    set_inputs(brushm2, [fbm2, dabpng])
+    set_inputs(restorem2, [fbm2, patchinm2])
+    set_inputs(fbm2, [bufm2])
+    set_inputs(swm2, [brushm2, restorem2])
+    set_inputs(bufm2, [swm2])
+    set_inputs(snapm2, [bufm2])
+    set_inputs(cropm2, [bufm2])
+    set_inputs(cropsnapm2, [snapm2])
+    set_inputs(maskc_level, [bufm2])
     set_inputs(src_level, [fit])
     set_inputs(paint_level, [buf])
     set_inputs(mask_level, [bufm])
     set_inputs(maskapply, [src_level, mask_level])
     set_inputs(color_src, [])
-    set_inputs(colapply, [color_src, mask_level])
+    set_inputs(colapply, [color_src, maskc_level])
     set_inputs(base_layer, [colapply, maskapply])     # цвет поверх источника с маской
     set_inputs(comp_over, [paint_level, base_layer])  # первый вход — верхний слой
     set_inputs(out1, [comp_over])
@@ -736,6 +778,7 @@ def build():
     # Отдельные выходы: краска и маска (со своей интенсивностью).
     set_inputs(outpaint, [paint_level])
     set_inputs(outmask, [mask_level])
+    set_inputs(outcmask, [maskc_level])
 
     # ---------------------------------------------------------------- данные
     put_text(runtime, src_rt)
@@ -766,18 +809,22 @@ def build():
     # ---------------------------------------------------------------- шейдеры
     for t, dat in ((brush, sh_paint), (restore, sh_rest), (unpremult, sh_unpre),
                    (brushm, sh_paint), (restorem, sh_rest),
+                   (brushm2, sh_paint), (restorem2, sh_rest),
                    (maskapply, sh_maskapply), (colapply, sh_colapply)):
         setp(t, pixeldat=dat)
     for t, vecs in ((brush, (('vec0name', 'uRes'), ('vec1name', 'uCount'),
                              ('vec2name', 'uColor'), ('vec3name', 'uRect'))),
                     (brushm, (('vec0name', 'uRes'), ('vec1name', 'uCount'),
                               ('vec2name', 'uColor'), ('vec3name', 'uRect'))),
+                    (brushm2, (('vec0name', 'uRes'), ('vec1name', 'uCount'),
+                               ('vec2name', 'uColor'), ('vec3name', 'uRect'))),
                     (restore, (('vec0name', 'uRes'), ('vec1name', 'uRect'))),
-                    (restorem, (('vec0name', 'uRes'), ('vec1name', 'uRect')))):
+                    (restorem, (('vec0name', 'uRes'), ('vec1name', 'uRect'))),
+                    (restorem2, (('vec0name', 'uRes'), ('vec1name', 'uRect')))):
         for parname, uni in vecs:
             setp(t, **{parname: uni})
-    for t in (brush, brushm, restore, restorem, sw, swm, fb, fbm, buf, bufm,
-              snap, snapm):
+    for t in (brush, brushm, brushm2, restore, restorem, restorem2,
+              sw, swm, swm2, fb, fbm, fbm2, buf, bufm, bufm2, snap, snapm, snapm2):
         picked = set_menu(t, 'format', *FMT_HDR)
         if picked:
             rep('%s.format = %s' % (t.name, picked))
@@ -799,10 +846,12 @@ def build():
     # Рантайм дополнительно проверяет и восстанавливает эту связь каждый кадр
     # (Runtime._ensure_wiring), чтобы старая сборка не оставила мёртвый слой.
     setp(fb, top=buf.path)
-    # Маска — та же петля, только со своим буфером.
+    # Маски — те же петли, только со своими буферами: у источника и у слоя цвета.
     setp(fbm, top=bufm.path)
+    setp(fbm2, top=bufm2.path)
     setp(patchin, play=0)
     setp(patchinm, play=0)
+    setp(patchinm2, play=0)
     setp(movie, play=0, speed=1)
     # ext — selectTOP: берёт TOP по пути. Пусто = внешнего источника нет, тогда
     # switch src берёт файл. Рантайм каждый кадр выставляет этот путь из параметра
@@ -811,15 +860,18 @@ def build():
     setp(src_level, opacity=1.0)
     setp(paint_level, opacity=1.0)
     setp(mask_level, opacity=1.0)
+    setp(maskc_level, opacity=1.0)
     # Слой цвета: ровный цвет во всё полотно, маску к нему применяет colapply.
     setp(color_src, colorr=1.0, colorg=1.0, colorb=1.0, alpha=1.0)
-    for t in (brush, brushm, restore, restorem, fit, proxy, maskapply, colapply):
+    for t in (brush, brushm, brushm2, restore, restorem, restorem2, fit, proxy,
+              maskapply, colapply):
         set_menu(t, 'outputresolution', 'custom', 'customresolution')
     # Размеры буферов ставим сразу: иначе до первого кадра в сети висели бы 1280x720.
-    for t in (brush, brushm, restore, restorem, fit, maskapply, colapply):
+    for t in (brush, brushm, brushm2, restore, restorem, restorem2, fit, maskapply,
+              colapply):
         setp(t, resolutionw=CANVAS_W, resolutionh=CANVAS_H)
     setp(proxy, resolutionw=max(64, CANVAS_W // 2), resolutionh=max(36, CANVAS_H // 2))
-    for t in (brush, brushm, restore, restorem):
+    for t in (brush, brushm, brushm2, restore, restorem, restorem2):
         # Слой хранится премультиплицированным (rgb = color * a — так выходит из
         # смешивания штампа с прозрачным фоном), и шейдеры ждут именно такое
         # «предыдущее» состояние. Поэтому просим TD не пересчитывать альфу:
@@ -854,15 +906,20 @@ def build():
         (0, 0, movie), (0, 1, ext), (0, 2, srcsel),
         (1, 2, fit), (1, 3, proxy),
         (2, 0, dabpng), (2, 1, patchin), (2, 2, fb), (2, 3, patchinm), (2, 4, fbm),
+        (2, 5, patchinm2), (2, 6, fbm2),
         (3, 2, brush), (3, 3, restore), (3, 4, brushm), (3, 5, restorem),
+        (3, 6, brushm2), (3, 7, restorem2),
         (4, 2, sw), (4, 3, snap), (4, 4, swm), (4, 5, snapm),
-        (5, 2, buf), (5, 4, bufm),
+        (4, 6, swm2), (4, 7, snapm2),
+        (5, 2, buf), (5, 4, bufm), (5, 6, bufm2),
         (6, 0, crop), (6, 1, cropundo), (6, 2, cropsnap), (6, 3, unpremult),
-        (6, 4, cropm), (6, 5, cropsnapm),
+        (6, 4, cropm), (6, 5, cropsnapm), (6, 6, cropm2), (6, 7, cropsnapm2),
         (7, 0, src_level), (7, 1, paint_level), (7, 3, maskapply),
         (7, 4, mask_level), (7, 5, color_src), (7, 6, colapply),
+        (7, 7, maskc_level),
         (8, 0, comp_over), (8, 1, base_layer),
         (9, 2, out1), (9, 3, outpaint), (9, 4, out), (9, 5, outmask),
+        (9, 6, outcmask),
     )
     for col, row, o in grid:
         if not place(o, 200 + col * STEP_X, -260 + row * STEP_Y):
@@ -905,10 +962,15 @@ def build():
              'patchin + restore — восстановление области для undo\n'
              'crop* — вырезать область в PNG для патчей и снимков undo'),
             ('2. СЛОЙ МАСКИ', 2,
-             'fbm + brushm + swm + bufm — отдельный буфер маски источника\n'
+             'fbm + brushm + swm + bufm — буфер маски ИСТОЧНИКА\n'
              'рисуется, когда в браузере выбран слой «Источник»\n'
              'patchinm + restorem — восстановление области для undo маски\n'
              'маска хранится белым: RGB = альфа'),
+            ('2б. МАСКА СЛОЯ ЦВЕТА', 5,
+             'fbm2 + brushm2 + swm2 + bufm2 — ОТДЕЛЬНЫЙ буфер маски слоя цвета\n'
+             'маски разные: стереть картинку и стереть цвет можно по отдельности\n'
+             'рисуется, когда в браузере выбран слой «Цвет»\n'
+             'patchinm2 + restorem2 + cropm2 — undo этой маски'),
             ('3. СБОРКА КАРТИНКИ', 7,
              'src_level / paint_level / mask_level — интенсивность слоёв\n'
              'maskapply — источник, умноженный на альфу маски\n'
@@ -1101,7 +1163,7 @@ def build():
         rep('dabpng.%s = %s (данные, а не цвет)' % (parname, picked or 'НЕ НАШЁЛ'))
 
     # ---------------------------------------------------------------- уборка
-    for o in (crop, cropundo, cropsnap):
+    for o in (crop, cropundo, cropsnap, cropm, cropsnapm, cropm2, cropsnapm2):
         set_menu(o, 'cropleftunit', 'pixels', 'pixel', 'native')
         set_menu(o, 'croprightunit', 'pixels', 'pixel', 'native')
         set_menu(o, 'cropbottomunit', 'pixels', 'pixel', 'native')
@@ -1147,6 +1209,10 @@ def build():
             ('bufm', ('format',)),
             ('crop', ('cropleftunit', 'format')),
             ('cropm', ('cropleftunit', 'format')),
+            ('cropm2', ('cropleftunit', 'format')),
+            ('maskc_level', ('opacity',)),
+            ('bufm2', ('format',)),
+            ('fbm2', ('format', 'top')),
             ('src_level', ('opacity',)),
             ('paint_level', ('opacity',)),
             ('maskapply', ('outputresolution', 'pixeldat')),

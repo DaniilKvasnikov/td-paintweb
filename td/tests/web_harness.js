@@ -593,8 +593,10 @@ async function run() {
   ws.text({
     t: 'welcome', ver: 1, canvas: { w: 1920, h: 1080 },
     layers: [
-      { id: 0, name: 'Источник', kind: 'source', visible: 1, opacity: 1, drawInto: 2, srcType: 'image', srcName: 'sample.png' },
-      { id: 3, name: 'Цвет', kind: 'color', visible: 1, opacity: 1, temp: 6500, tempMin: 2000, tempMax: 10000, tempStep: 50, drawInto: 2 },
+      { id: 0, name: 'Источник', kind: 'source', visible: 1, opacity: 1, drawInto: 2, usesMask: 2, srcType: 'image', srcName: 'sample.png' },
+      { id: 3, name: 'Цвет', kind: 'color', visible: 1, opacity: 1, temp: 6500, tempMin: 2000, tempMax: 10000, tempStep: 50, drawInto: 4, usesMask: 4 },
+      { id: 2, name: 'Маска источника', kind: 'mask', visible: 1, opacity: 1, ui: 0, role: 'source' },
+      { id: 4, name: 'Маска слоя цвета', kind: 'mask', visible: 1, opacity: 1, ui: 0, role: 'color' },
       { id: 1, name: 'Краска', kind: 'paint', visible: 1, opacity: 1, drawInto: 1 },
       { id: 2, name: 'Маска источника', kind: 'mask', visible: 1, opacity: 1, ui: 0 },
     ],
@@ -659,6 +661,15 @@ async function run() {
       && Math.round(tempMsgs[tempMsgs.length - 1].value) === 3200,
       tempMsgs.slice(-2));
   }
+
+  // Маски — служебные буферы: строк в панели у них нет, но их теперь ДВЕ, и
+  // клиент обязан показать ровно три строки (источник, цвет, краска).
+  check('обе маски скрыты из панели (у них ui: 0)',
+    !layerRowById(2) && !layerRowById(4),
+    { mask2: !!layerRowById(2), mask4: !!layerRowById(4) });
+  check('в панели три строки: источник, цвет, краска',
+    [0, 3, 1].every((id) => !!layerRowById(id)),
+    [0, 1, 3, 4].map((id) => [id, !!layerRowById(id)]));
 
   /* ---- рисование мышью ---- */
   const view = DOC.getElementById('view');
@@ -911,8 +922,10 @@ async function run() {
   ws.text({
     t: 'welcome', ver: 1, canvas: { w: 1280, h: 720 },
     layers: [
-      { id: 0, name: 'Источник', kind: 'source', visible: 1, opacity: 1, drawInto: 2, srcType: 'image', srcName: 'sample.png' },
-      { id: 3, name: 'Цвет', kind: 'color', visible: 1, opacity: 1, temp: 6500, tempMin: 2000, tempMax: 10000, tempStep: 50, drawInto: 2 },
+      { id: 0, name: 'Источник', kind: 'source', visible: 1, opacity: 1, drawInto: 2, usesMask: 2, srcType: 'image', srcName: 'sample.png' },
+      { id: 3, name: 'Цвет', kind: 'color', visible: 1, opacity: 1, temp: 6500, tempMin: 2000, tempMax: 10000, tempStep: 50, drawInto: 4, usesMask: 4 },
+      { id: 2, name: 'Маска источника', kind: 'mask', visible: 1, opacity: 1, ui: 0, role: 'source' },
+      { id: 4, name: 'Маска слоя цвета', kind: 'mask', visible: 1, opacity: 1, ui: 0, role: 'color' },
       { id: 1, name: 'Краска', kind: 'paint', visible: 1, opacity: 1, drawInto: 1 },
       { id: 2, name: 'Маска источника', kind: 'mask', visible: 1, opacity: 1, ui: 0 },
     ],
