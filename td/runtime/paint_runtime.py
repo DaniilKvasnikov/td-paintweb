@@ -64,7 +64,7 @@ DEFAULT_TUN = {
     'srcfile': '', 'srcvisible': 1.0, 'srcopacity': 1.0,
     'paintvisible': 1.0, 'paintopacity': 1.0, 'paintmask': False,
     'srcint': 1.0, 'paintint': 1.0, 'maskint': 1.0,
-    'colorint': 0.0, 'colortemp': 6500.0,
+    'colorint': 1.0, 'colortemp': 6500.0, 'colorvisible': 0.0,
     'fitmode': 3, 'useext': False, 'externalsrc': '',
     'patchmode': 'patches', 'fullfps': 6.0, 'fulljpeg': False, 'flipy': False,
     'datadir': '',
@@ -942,8 +942,11 @@ class Runtime(object):
         t['srcint'] = _clip(float(g('Srcint', 1)), 0.0, 4.0)
         t['paintint'] = _clip(float(g('Paintint', 1)), 0.0, 4.0)
         t['maskint'] = _clip(float(g('Maskint', 1)), 0.0, 4.0)
-        t['colorint'] = _clip(float(g('Colorint', 0)), 0.0, 1.0)
+        t['colorint'] = _clip(float(g('Colorint', 1.0)), 0.0, 1.0)
         t['colortemp'] = _clip(float(g('Colortemp', 6500.0)), 1000.0, 40000.0)
+        # Видимость слоя цвета: отдельный тумблер, как у остальных слоёв. Раньше
+        # слой выключался нулевой интенсивностью, и в панели слоёв его не было.
+        t['colorvisible'] = 1.0 if float(g('Colorvisible', 0)) else 0.0
         t['paintmask'] = False         # поле больше не используется: маска — свой слой
         t['fitmode'] = int(_clip(float(g('Fitmode', 3)), 0, len(FIT_MODES) - 1))
         t['useext'] = float(g('Useext', 0)) > 0.5
@@ -1069,6 +1072,17 @@ class Runtime(object):
              'fit': self.fit_name(),
              'fitModes': [{'key': k, 'label': lab} for k, lab, _tk in FIT_MODES],
              'srcType': self.src_kind, 'srcName': name, 'srcPath': self.src_path or ''},
+            # Слой монотонного цвета: ровный цвет по той же маске, что и источник
+            # (в TD это color_src + colapply). Стоит между источником и краской —
+            # и в композите, и в панели слоёв порядок один и тот же, сверху вниз.
+            # Кисть по этому слою рисует маску (drawInto=2), как и по «Источнику»:
+            # форма слоя цвета — это маска, своего буфера у него нет.
+            {'id': 3, 'name': 'Цвет', 'kind': 'color',
+             'visible': 1 if t.get('colorvisible', 0.0) > 0.001 else 0,
+             'opacity': t.get('colorint', 1.0),
+             'temp': int(round(t.get('colortemp', 6500.0))),
+             'tempMin': 2000, 'tempMax': 10000, 'tempStep': 50,
+             'drawInto': 2},
             {'id': 1, 'name': 'Краска', 'kind': 'paint',
              'visible': 1 if t['paintvisible'] > 0.001 else 0,
              'opacity': t['paintopacity'], 'drawInto': 1},
@@ -1195,6 +1209,14 @@ class Runtime(object):
                 # prop == 'mode' больше не существует: в интерфейсе нет переключателя
                 # «рисовать / маска». Куда попадёт мазок, решает выбранный слой
                 # (см. layers(): у каждого слоя есть drawInto).
+            elif lid == 3:
+                # Слой монотонного цвета: видимость, интенсивность и температура.
+                if prop == 'visible':
+                    b.par.Colorvisible = 1 if float(val) else 0
+                elif prop == 'opacity':
+                    b.par.Colorint = _clip(float(val), 0.0, 1.0)
+                elif prop == 'temp':
+                    b.par.Colortemp = _clip(float(val), 1000.0, 40000.0)
         except Exception:
             self.err('set_layer', traceback.format_exc())
         for lay in self.layers():
@@ -1241,14 +1263,14 @@ class Runtime(object):
         """В какой буфер TD попадёт мазок, адресованный этому слою.
 
         Слой 1 (краска) — буфер краски. Слой 2 — маска, и туда же идут мазки,
-        адресованные слою 0 («Источник»): в интерфейсе маска — это часть слоя
-        источника, отдельного переключателя режима больше нет.
+        адресованные слоям 0 («Источник») и 3 («Цвет»): форма обоих — маска
+        источника, отдельного буфера у них нет.
         """
         try:
             lid = int(layer_id)
         except Exception:
             return 'paint'
-        return 'mask' if lid in (0, 2) else 'paint'
+        return 'mask' if lid in (0, 2, 3) else 'paint'
 
     def _points(self, data):
         if len(data) < 9:
@@ -2407,7 +2429,7 @@ class Runtime(object):
         paint_mul = _clip(t['paintopacity'] * t['paintvisible'] * t.get('paintint', 1.0),
                           0.0, 1.0)
         mask_mul = _clip(t.get('maskint', 1.0), 0.0, 1.0)
-        color_k = _clip(t.get('colorint', 0.0), 0.0, 1.0)
+        color_k = _clip(t.get('colorint', 1.0) * t.get('colorvisible', 0.0), 0.0, 1.0)
         cr, cg, cb = kelvin_rgb(t.get('colortemp', 6500.0))
         key = (round(src_mul, 4), round(paint_mul, 4), round(mask_mul, 4),
                round(color_k, 4), round(cr, 3), round(cg, 3), round(cb, 3))

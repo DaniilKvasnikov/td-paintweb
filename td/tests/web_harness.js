@@ -594,6 +594,7 @@ async function run() {
     t: 'welcome', ver: 1, canvas: { w: 1920, h: 1080 },
     layers: [
       { id: 0, name: 'Источник', kind: 'source', visible: 1, opacity: 1, drawInto: 2, srcType: 'image', srcName: 'sample.png' },
+      { id: 3, name: 'Цвет', kind: 'color', visible: 1, opacity: 1, temp: 6500, tempMin: 2000, tempMax: 10000, tempStep: 50, drawInto: 2 },
       { id: 1, name: 'Краска', kind: 'paint', visible: 1, opacity: 1, drawInto: 1 },
       { id: 2, name: 'Маска источника', kind: 'mask', visible: 1, opacity: 1, ui: 0 },
     ],
@@ -621,6 +622,43 @@ async function run() {
   check('кнопка «Слои» возвращает панель и подсвечивается',
     reopened && layersBtn.classList.contains('on'),
     { reopened: reopened, on: layersBtn.classList.contains('on') });
+
+  /* ---- слой цвета: отдельная строка с ползунком температуры ---- */
+  // Раньше у слоя цвета не было управления на странице: он жил только
+  // параметрами компонента. Проверяем, что строка есть и ползунок уходит на
+  // сервер тем же протоколом, что и прозрачность (prop='temp').
+  function inputsInRow(row) {
+    const out = [];
+    const stack = row ? [row] : [];
+    while (stack.length) {
+      const el = stack.shift();
+      if (el !== row && el.tagName === 'INPUT') out.push(el);
+      for (const c of (el.children || [])) stack.push(c);
+    }
+    return out;
+  }
+
+  const colorRow = layerRowById(3);
+  check('в панели слоёв есть отдельная строка слоя «Цвет»', !!colorRow,
+    ALL_EL.filter((e) => e && e.dataset && e.dataset.id).map((e) => e.dataset.id));
+  const colorRanges = colorRow ? inputsInRow(colorRow) : [];
+  const tempRange = colorRanges.filter((el) => String(el.min) === '2000')[0] || null;
+  check('у слоя цвета есть ползунок температуры 2000…10000 К',
+    !!tempRange && tempRange.type === 'range' && tempRange.min === '2000'
+    && tempRange.max === '10000',
+    colorRanges.map((el) => [el.type, el.min, el.max]));
+  if (tempRange) {
+    tempRange.value = '3200';
+    fireOn(tempRange, 'input', { type: 'input', target: tempRange });
+    NOW += 200;
+    flushTimers(400);
+    const tempMsgs = ws.sent.map(safeJson)
+      .filter((m) => m && m.t === 'layer' && m.prop === 'temp');
+    check('ползунок температуры уходит на сервер как prop=temp (слой 3)',
+      tempMsgs.length > 0 && String(tempMsgs[tempMsgs.length - 1].id) === '3'
+      && Math.round(tempMsgs[tempMsgs.length - 1].value) === 3200,
+      tempMsgs.slice(-2));
+  }
 
   /* ---- рисование мышью ---- */
   const view = DOC.getElementById('view');
@@ -874,6 +912,7 @@ async function run() {
     t: 'welcome', ver: 1, canvas: { w: 1280, h: 720 },
     layers: [
       { id: 0, name: 'Источник', kind: 'source', visible: 1, opacity: 1, drawInto: 2, srcType: 'image', srcName: 'sample.png' },
+      { id: 3, name: 'Цвет', kind: 'color', visible: 1, opacity: 1, temp: 6500, tempMin: 2000, tempMax: 10000, tempStep: 50, drawInto: 2 },
       { id: 1, name: 'Краска', kind: 'paint', visible: 1, opacity: 1, drawInto: 1 },
       { id: 2, name: 'Маска источника', kind: 'mask', visible: 1, opacity: 1, ui: 0 },
     ],

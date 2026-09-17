@@ -564,13 +564,14 @@ def main():
     # краски есть drawInto (куда адресовать мазок), у маски — ui:0 (своей строки
     # в панели у неё нет: маска — часть слоя «Источник»).
     kinds = [l['kind'] for l in state['layers']]
-    check('/api/state отдаёт источник, краску и буфер маски',
-          kinds == ['source', 'paint', 'mask'], kinds)
-    check('у слоёв есть цель рисования drawInto',
-          [l.get('drawInto') for l in state['layers'][:2]] == [2, 1],
+    check('/api/state отдаёт источник, слой цвета, краску и буфер маски',
+          kinds == ['source', 'color', 'paint', 'mask'], kinds)
+    check('у слоёв есть цель рисования drawInto (источник и цвет — в маску)',
+          [l.get('drawInto') for l in state['layers'][:3]] == [2, 2, 1],
           [l.get('drawInto') for l in state['layers']])
+    mask_lay = [l for l in state['layers'] if l['kind'] == 'mask']
     check('буфер маски скрыт из панели слоёв',
-          state['layers'][2].get('ui') == 0, state['layers'][2])
+          len(mask_lay) == 1 and mask_lay[0].get('ui') == 0, state['layers'])
     resp = {}
     out = rt.http({'method': 'POST', 'uri': '/api/upload', 'pars': {'name': 'my file.png'},
                    'data': b'\x89PNG\r\n\x1a\n'}, resp)
@@ -1042,6 +1043,7 @@ def main():
     rt.read_pars()
     rt.tun['maskint'] = 0.5
     rt.tun['colorint'] = 0.7
+    rt.tun['colorvisible'] = 1.0        # слой цвета включён своим тумблером
     rt.tun['colortemp'] = 3000.0
     rt._compose_key = None
     rt._apply_compose()
@@ -1057,6 +1059,58 @@ def main():
     check('параметры интенсивности читаются из компонента',
           (rt.tun.get('srcint'), rt.tun.get('paintint')) == (1.0, 1.0),
           (rt.tun.get('srcint'), rt.tun.get('paintint')))
+
+    # -------------------------------- слой цвета как отдельный слой панели
+    print('\n[24] слой «Цвет»: отдельная строка, видимость, температура')
+    kinds = [l.get('kind') for l in rt.layers()]
+    cols = [l for l in rt.layers() if l.get('kind') == 'color']
+    check('в списке слоёв есть отдельный слой цвета', len(cols) == 1, kinds)
+    check('порядок слоёв как в композите: источник → цвет → краска',
+          kinds[:3] == ['source', 'color', 'paint'], kinds)
+    col = cols[0] if cols else {}
+    check('у слоя цвета есть видимость, интенсивность и температура',
+          col.get('visible') in (0, 1)
+          and isinstance(col.get('opacity'), float)
+          and 1000 <= col.get('temp', 0) <= 40000, col)
+    check('границы ползунка температуры приезжают со страницы',
+          (col.get('tempMin'), col.get('tempMax')) == (2000, 10000), col)
+    check('кисть по слою цвета рисует маску (своего буфера у него нет)',
+          rt.layer_target(3) == 'mask', rt.layer_target(3))
+
+    rt._set_layer({'id': 3, 'prop': 'visible', 'value': 1})
+    rt._set_layer({'id': 3, 'prop': 'opacity', 'value': 0.4})
+    rt._set_layer({'id': 3, 'prop': 'temp', 'value': 3200})
+    check('видимость слоя цвета идёт в Colorvisible',
+          base.par['Colorvisible'].eval() in (1, True),
+          base.par['Colorvisible'].eval())
+    check('интенсивность слоя цвета идёт в Colorint',
+          near(base.par['Colorint'].eval(), 0.4, 0.01), base.par['Colorint'].eval())
+    check('температура со страницы идёт в Colortemp',
+          near(base.par['Colortemp'].eval(), 3200.0, 1.0),
+          base.par['Colortemp'].eval())
+
+    # Композит: скрытый слой цвета не красит полотно, включённый — отдаёт цвет.
+    cs = base.op('color_src')
+    rt.read_pars()
+    rt.tun['colorvisible'] = 0.0
+    rt.tun['colorint'] = 1.0
+    rt._compose_key = None
+    rt._apply_compose()
+    check('скрытый слой цвета не влияет на композит (альфа 0)',
+          near(cs.par.alpha.eval(), 0.0, 0.01), cs.par.alpha.eval())
+    rt.tun['colorvisible'] = 1.0
+    rt.tun['colortemp'] = 2200.0
+    rt._compose_key = None
+    rt._apply_compose()
+    warm = [cs.par[c].eval() for c in ('colorr', 'colorg', 'colorb')]
+    check('включённый слой цвета отдаёт свою интенсивность',
+          near(cs.par.alpha.eval(), 1.0, 0.01), cs.par.alpha.eval())
+    check('цвет включённого слоя тёплый при 2200K (R много больше B)',
+          warm[0] > warm[2] + 0.5, warm)
+    rt.tun['colorvisible'] = 0.0
+    rt.tun['colortemp'] = 6500.0
+    rt._compose_key = None
+    rt._apply_compose()
 
     # ---------------------------------------------- кнопка «Обновить из git»
     print('\n[23] обновление исходников из git')

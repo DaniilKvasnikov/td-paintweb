@@ -381,6 +381,7 @@ def check_pars(base):
         '.': ('Canvasw', 'Canvash', 'Patchhz', 'Proxyfps', 'Undodepth', 'Srcfile',
               'Srcvisible', 'Srcopacity', 'Paintvisible', 'Paintopacity', 'Fitmode',
               'Srcint', 'Paintint', 'Maskint', 'Colorint', 'Colortemp',
+              'Colorvisible',
               'Useext', 'Externalsrc', 'Fullframe', 'Fullfps', 'Fulljpeg',
               'Flipy', 'Datadir', 'Page', 'Openpage'),
         'server/ws': ('port', 'active', 'callbacks'),
@@ -992,7 +993,8 @@ def build():
         addpar('Float', 'Srcint', 'Интенсивность источника', 1.0)
         addpar('Float', 'Paintint', 'Интенсивность краски', 1.0)
         addpar('Float', 'Maskint', 'Интенсивность маски', 1.0)
-        addpar('Float', 'Colorint', 'Интенсивность слоя цвета (0 — выключен)', 0.0)
+        addpar('Float', 'Colorint', 'Интенсивность слоя цвета', 1.0)
+        addpar('Toggle', 'Colorvisible', 'Слой цвета виден', 0)
         # Цветовая температура слоя цвета в Кельвинах: 2000 — тёплый, 6500 —
         # нейтральный, 10000 — холодный. Рантайм переводит её в RGB.
         addpar('Float', 'Colortemp', 'Цветовая температура слоя цвета (К)', 6500.0)
@@ -1029,7 +1031,8 @@ def build():
          Paintvisible=1, Paintopacity=1.0, Useext=0, Flipy=0,
          Datadir=paint_dir, Srcfile=sample, Externalsrc='',
          Fullfps=6.0, Fulljpeg=0, Fullframe=0, Fitmode=3,
-         Srcint=1.0, Paintint=1.0, Maskint=1.0, Colorint=0.0, Colortemp=6500.0)
+         Srcint=1.0, Paintint=1.0, Maskint=1.0, Colorint=1.0, Colortemp=6500.0,
+         Colorvisible=0)
 
     # ---------------------------------------------------------------- папки
     for sub in ('web', 'uploads', 'media', 'tmp'):

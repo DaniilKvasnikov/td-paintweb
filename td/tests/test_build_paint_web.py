@@ -798,8 +798,9 @@ def _integration(base, paint_dir):
           rep['ops']['crop']['pars'].get('cropleftunit') == 'pixels',
           rep['ops']['crop']['pars'])
     check('в отчёте есть счётчик ошибок', 'errors_total' in rep)
-    check('в отчёте перечислены слои (источник, краска, буфер маски)', 
-          [l['kind'] for l in rep.get('layers', [])] == ['source', 'paint', 'mask'],
+    check('в отчёте перечислены слои (источник, цвет, краска, буфер маски)',
+          [l['kind'] for l in rep.get('layers', [])] == ['source', 'color', 'paint',
+                                                         'mask'],
           rep.get('layers'))
     # HTTP-эндпоинт отдаёт тот же отчёт
     resp = {}

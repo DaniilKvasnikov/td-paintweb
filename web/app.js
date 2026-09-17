@@ -606,6 +606,14 @@ function drawLayers(vx) {
       continue;
     }
 
+    if (L.kind === 'color') {
+      // Слой монотонного цвета: ровный цвет по температуре, обрезанный той же
+      // маской, что и источник (в TD это color_src + colapply). Пока маска не
+      // пришла, показываем цвет целиком — в TD маска при старте залита белым.
+      drawColorLayer(vx, maskSurf, L, opacity);
+      continue;
+    }
+
     if (L.kind !== 'paint') continue;
 
     const ps = paintSurface(L.id, false);
@@ -640,6 +648,53 @@ function drawMaskedSource(vx, maskSurf, opacity) {
   vx.globalAlpha = opacity;
   vx.drawImage(surf.temp.c, 0, 0, W, H);
   vx.globalAlpha = 1;
+}
+
+/* Слой монотонного цвета: залили прямоугольник цветом по температуре и оставили
+   его только там, где маска (destination-in по альфе маски) — тот же приём, что
+   у источника, поэтому картинка совпадает с TD. */
+function drawColorLayer(vx, maskSurf, L, opacity) {
+  const W = state.canvas.w;
+  const H = state.canvas.h;
+  const tmp = surf.temp.x;
+  const rgb = kelvinToRgb(L.temp);
+
+  tmp.setTransform(1, 0, 0, 1, 0, 0);
+  tmp.globalAlpha = 1;
+  tmp.globalCompositeOperation = 'source-over';
+  tmp.clearRect(0, 0, W, H);
+  tmp.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+  tmp.fillRect(0, 0, W, H);
+  if (maskSurf && surf.maskReady) {
+    tmp.globalCompositeOperation = 'destination-in';
+    tmp.drawImage(maskSurf.c, 0, 0, W, H);
+  }
+  tmp.globalCompositeOperation = 'source-over';
+
+  vx.globalAlpha = opacity;
+  vx.drawImage(surf.temp.c, 0, 0, W, H);
+  vx.globalAlpha = 1;
+}
+
+/* Кельвины -> RGB 0..255. То же приближение Таннера Хелланда, что и в TD
+   (paint_runtime.kelvin_rgb): число одно на двоих, поэтому браузер и
+   TouchDesigner показывают один и тот же цвет — в том числе на ползунке. */
+function kelvinToRgb(kelvin) {
+  const raw = Number(kelvin);
+  const k = clamp(isFinite(raw) ? raw : 6500, 1000, 40000) / 100;
+  const ch = function (v) { return Math.round(clamp(v, 0, 255)); };
+  let r, g, b;
+  if (k <= 66) {
+    r = 255;
+    g = 99.4708025861 * Math.log(k) - 161.1195681661;
+  } else {
+    r = 329.698727446 * Math.pow(k - 60, -0.1332047592);
+    g = 288.1221695283 * Math.pow(k - 60, -0.0755148492);
+  }
+  if (k >= 66) b = 255;
+  else if (k <= 19) b = 0;
+  else b = 138.5177312231 * Math.log(k - 10) - 305.0447927307;
+  return [ch(r), ch(g), ch(b)];
 }
 
 /* Кольцо реального размера кисти. Радиус — size/2 в пикселях полотна,
@@ -1854,7 +1909,8 @@ function buildLayerRow(L) {
 
   const chip = document.createElement('span');
   chip.className = 'kind-chip';
-  chip.textContent = (L.kind === 'source') ? 'источник · маска' : 'краска';
+  chip.textContent = (L.kind === 'source') ? 'источник · маска'
+                     : (L.kind === 'color' ? 'цвет по маске' : 'краска');
 
   head.append(eye, name, chip);
   if (isTarget) {
@@ -1904,6 +1960,57 @@ function buildLayerRow(L) {
     hint.className = 'layer-hint';
     hint.textContent = 'Кисть рисует краску, ластик стирает её.';
     row.appendChild(hint);
+  }
+
+  if (L.kind === 'color') {
+    // Температура слоя цвета: 2000 К — тёплый, 6500 К — нейтральный, 10000 К —
+    // холодный. Ползунок отправляет prop='temp', рантайм кладёт это в Colortemp,
+    // а цвет и в TD, и здесь считается одной и той же формулой (kelvinToRgb).
+    const tempRow = document.createElement('div');
+    tempRow.className = 'layer-row layer-row--temp';
+
+    const tempLabel = document.createElement('span');
+    tempLabel.className = 'row-label';
+    tempLabel.textContent = 'Температура';
+
+    const tempRange = document.createElement('input');
+    tempRange.type = 'range';
+    tempRange.min = String(L.tempMin || 2000);
+    tempRange.max = String(L.tempMax || 10000);
+    tempRange.step = String(L.tempStep || 50);
+    const tempVal = Number(L.temp) || 6500;
+    tempRange.value = String(tempVal);
+    tempRange.setAttribute('aria-label', 'Цветовая температура слоя цвета');
+
+    const tempOut = document.createElement('output');
+    tempOut.textContent = Math.round(tempVal) + ' K';
+
+    const swatch = document.createElement('span');
+    swatch.className = 'temp-swatch';
+    function paintSwatch(k) {
+      const rgb = kelvinToRgb(k);
+      swatch.style.background = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+    }
+    paintSwatch(tempVal);
+
+    tempRange.addEventListener('input', function () {
+      lastSliderDragAt = performance.now();
+      const k = parseFloat(tempRange.value);
+      tempOut.textContent = Math.round(k) + ' K';
+      paintSwatch(k);
+      setLayerProp(L.id, 'temp', k);
+    });
+    tempRange.addEventListener('change', function () { lastSliderDragAt = NEVER; });
+    tempRange.addEventListener('click', function (e) { e.stopPropagation(); });
+
+    tempRow.append(tempLabel, tempRange, tempOut, swatch);
+    row.appendChild(tempRow);
+
+    const colorHint = document.createElement('p');
+    colorHint.className = 'layer-hint';
+    colorHint.textContent = 'Ровный цвет по маске источника: кисть проявляет цвет, '
+                          + 'ластик убирает его. Цвет слоя считается по температуре.';
+    row.appendChild(colorHint);
   }
 
   if (L.kind === 'source') {

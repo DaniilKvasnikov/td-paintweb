@@ -764,6 +764,9 @@ def build_tree(paint_dir):
         Paintopacity=Par('Paintopacity', 1.0), Fitmode=Par('Fitmode', 3),
         Useext=Par('Useext', 0), Externalsrc=Par('Externalsrc', ''),
         Flipy=Par('Flipy', 0), Datadir=Par('Datadir', paint_dir),
+        # Слой монотонного цвета: интенсивность, температура и видимость.
+        Colorint=Par('Colorint', 1.0), Colortemp=Par('Colortemp', 6500.0),
+        Colorvisible=Par('Colorvisible', 0),
     # Ссылка на интерфейс в самой базе: адрес и кнопка (Pulse — счётчик нажатий).
     Page=Par('Page', ''), Openpage=Par('Openpage', 0))
 

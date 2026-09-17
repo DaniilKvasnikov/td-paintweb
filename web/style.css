@@ -481,6 +481,16 @@ input.hex.bad { border-color: var(--err); color: var(--err); }
   color: var(--muted);
 }
 
+/* Слой цвета: рядом с температурой — плашка самого цвета, «6500 K» шире 40px */
+.layer-row--temp output { flex: 0 0 58px; }
+.temp-swatch {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+}
+
 .layer select, .mini-btn {
   font: inherit;
   font-size: 12px;
