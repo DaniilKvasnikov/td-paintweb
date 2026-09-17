@@ -489,7 +489,14 @@ class Runtime(object):
         except Exception:
             folder = ''
         for cand in (os.path.join(folder, 'paint'), folder):
-            if cand and os.path.isfile(os.path.join(cand, 'td', 'build_paint_web.py')):
+            # Признак папки исходников: скрипт сборки или сам рантайм. В репозитории
+            # веб-интерфейса исходники лежат в корне, в проекте — в paint/, поэтому
+            # проверяем оба варианта и оба маркера.
+            if not cand:
+                continue
+            if (os.path.isfile(os.path.join(cand, 'td', 'build_paint_web.py'))
+                    or os.path.isfile(os.path.join(cand, 'td', 'runtime',
+                                                   'paint_runtime.py'))):
                 return os.path.normpath(cand)
         return os.path.normpath(d) if d else ''
 
@@ -775,7 +782,19 @@ class Runtime(object):
                     os.makedirs(cand)
                 except Exception:
                     cand = ''
-            d = cand or root
+            if not cand:
+                # В корень проекта данные не пишем: там может лежать своя папка
+                # web/ и файлы пользователя. Если paint/ создать не удалось,
+                # уходим во временную папку системы и честно пишем об этом.
+                import tempfile
+                cand = os.path.join(tempfile.gettempdir(), 'paintweb')
+                try:
+                    os.makedirs(cand)
+                except Exception:
+                    pass
+                self.log('папку paint рядом с проектом создать не удалось — '
+                         'данные во временной папке %s' % cand)
+            d = cand
             if d and not getattr(self, '_dirs_logged', False):
                 self._dirs_logged = True
                 self.log('папка данных: %s' % d)
@@ -3244,19 +3263,52 @@ class Runtime(object):
             return None
         return text if text else None
 
-    def materialize_web(self):
-        """Разложить страницу из DAT-ов в папку web (если файлов там нет).
+    def _web_hash(self, text):
+        import hashlib
+        return hashlib.sha1(text.encode('utf-8', 'replace')).hexdigest()
 
-        После сборки DAT-ы — источник правды, а папку web видно и можно править
-        руками, поэтому сверяем содержимое и обновляем только отличающееся.
+    def _web_marks(self, d):
+        """Отпечатки страниц, которые в эту папку положил сам компонент."""
+        import json
+        try:
+            with open(os.path.join(d['tmp'], 'web_materialized.json'),
+                      'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            pass
+        return {}
+
+    def _web_marks_save(self, d, marks):
+        import json
+        try:
+            with open(os.path.join(d['tmp'], 'web_materialized.json'),
+                      'w', encoding='utf-8') as f:
+                json.dump(marks, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+    def materialize_web(self):
+        """Разложить страницу из DAT-ов в папку web.
+
+        Страница лежит в компоненте тремя DAT-ами, поэтому .tox работает в чужом
+        проекте, где папки web нет. Правила записи:
+          * файла нет — кладём из компонента;
+          * файл есть и его же положил компонент (помним отпечатки) — обновляем;
+          * файл есть, а содержимое другое — это рабочая копия или чужая правка,
+            её НЕ трогаем, только пишем в журнал.
+        Иначе страница из компонента затирала бы файлы, которых не писала: так
+        однажды был затёрт рабочий web/app.js заглушкой из тестовой сборки.
         """
         d = self.dirs()
+        folder = d['web']
+        marks = self._web_marks(d)
         made = []
         for name, rel in self.WEB_DATS.items():
             text = self._web_dat(name)
             if not text:
                 continue
-            folder = d['web']
             if not os.path.isdir(folder):
                 try:
                     os.makedirs(folder)
@@ -3269,12 +3321,19 @@ class Runtime(object):
                     with open(full, 'r', encoding='utf-8') as f:
                         cur = f.read()
                 if cur == text:
+                    marks[name] = self._web_hash(text)
+                    continue
+                if cur and marks.get(name) != self._web_hash(cur):
+                    self.log('%s не тронут: файл не от компонента (правка на диске)'
+                             % name)
                     continue
                 with open(full, 'w', encoding='utf-8') as f:
                     f.write(text)
+                marks[name] = self._web_hash(text)
                 made.append(name)
             except Exception:
                 self.err('web-write', traceback.format_exc())
+        self._web_marks_save(d, marks)
         if made:
             self.log('страница разложена из компонента: %s' % ', '.join(made))
         return made

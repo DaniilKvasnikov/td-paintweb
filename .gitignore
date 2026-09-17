@@ -14,6 +14,8 @@ td/last_build_report.txt
 *.toe
 tox/
 *.tox
+# Исключение: готовый компонент для вставки в TouchDesigner лежит в dist/
+!dist/*.tox
 
 # Python
 __pycache__/

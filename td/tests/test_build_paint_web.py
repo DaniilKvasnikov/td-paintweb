@@ -87,6 +87,12 @@ def main():
     # сборка требует на месте код рантайма и непустую веб-папку
     shutil.copytree(os.path.join(PAINT, 'td', 'runtime'),
                     os.path.join(paint_dir, 'td', 'runtime'))
+    # Скрипты сборки и проверок — тоже: рантайм считает дерево исходников готовым
+    # только когда видит их рядом с рантаймом (иначе пишет «нет файла сборки»).
+    for name in sorted(os.listdir(os.path.join(PAINT, 'td'))):
+        src_py = os.path.join(PAINT, 'td', name)
+        if name.endswith('.py') and os.path.isfile(src_py):
+            shutil.copy2(src_py, os.path.join(paint_dir, 'td', name))
     with open(os.path.join(paint_dir, 'web', 'index.html'), 'w', encoding='utf-8') as f:
         f.write('<html>test</html>')
     with open(os.path.join(paint_dir, 'web', 'app.js'), 'w', encoding='utf-8') as f:
@@ -548,6 +554,11 @@ def _integration(base, paint_dir):
         boot_src = f.read()
     boot = types.ModuleType('paintweb_boot')
     boot.__dict__['op'] = fake_td.make_op_func()
+    # Рантайм ищет папку исходников рядом с проектом (<проект>/paint или корень
+    # репозитория). В тесте проекта нет — подставляем фальшивый с папкой
+    # исходников: иначе автозапуск честно пишет «не нашёл папку paint» и проверка
+    # «рантайм не логировал ошибок» падает на пустом месте.
+    boot.__dict__['project'] = fake_td.FakeProject(paint_dir)
     base.op('server/runtime').text = open(
         os.path.join(PAINT, 'td', 'runtime', 'paint_runtime.py'),
         encoding='utf-8').read()
