@@ -1,0 +1,39 @@
+# Отчёты и данные прогонов: это не исходники
+tmp/
+paint/tmp/
+uploads/
+paint/uploads/
+media/
+paint/media/
+td/last_build_report.txt
+*.png
+!web/**/*.png
+!td/tests/**/*.png
+
+# Сборка TouchDesigner: проект и .tox живут вместе с проектом, не здесь
+*.toe
+tox/
+*.tox
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+_tmp_*/
+_tmp_build/
+_tmp_run/
+_tmp_test/
+_tmp_repro/
+_check_summary/
+
+# Редакторы и система
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+
+# Секреты и локальные адреса
+*.local
+token.txt

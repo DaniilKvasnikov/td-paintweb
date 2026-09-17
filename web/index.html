@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>PixelFlow — рисование</title>
+<!-- Вся статика локальная: ни CDN, ни внешних шрифтов, ни сборки. -->
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- =====================================================================
+       Верхняя панель инструментов (переносится по строкам на узких экранах)
+       ===================================================================== -->
+  <header id="toolbar">
+
+    <div class="tb-group" role="group" aria-label="Инструмент">
+      <span class="tb-label">Инструмент</span>
+      <div class="seg" id="toolButtons">
+        <button type="button" class="seg-btn" data-tool="brush" title="B">Кисть</button>
+        <button type="button" class="seg-btn" data-tool="eraser" title="E">Ластик</button>
+        <button type="button" class="seg-btn" data-tool="pan" title="H">Панорама</button>
+      </div>
+    </div>
+
+    <div class="tb-group" role="group" aria-label="Слой для рисования">
+      <span class="tb-label">Рисуем по слою</span>
+      <div class="tb-hint" id="targetHint">выбери слой в панели «Слои»</div>
+    </div>
+
+    <div class="tb-group" role="group" aria-label="Цвет">
+      <span class="tb-label">Цвет</span>
+      <div class="color-row">
+        <input type="color" id="colorPicker" value="#ff3366" aria-label="Цвет кисти" />
+        <input type="text" id="colorHex" class="hex" value="#ff3366" spellcheck="false"
+               autocomplete="off" autocapitalize="off" aria-label="Цвет в HEX" />
+      </div>
+      <div id="swatches" class="swatches" aria-label="Последние цвета"></div>
+    </div>
+
+    <div class="tb-group tb-group--sliders" role="group" aria-label="Параметры кисти">
+      <label class="slider"><span class="sl-name">Размер</span>
+        <input type="range" id="size" min="1" max="400" step="1" value="40" />
+        <output id="sizeOut">40</output></label>
+      <label class="slider"><span class="sl-name">Жёсткость</span>
+        <input type="range" id="hardness" min="0" max="1" step="0.01" value="0.7" />
+        <output id="hardnessOut">0.70</output></label>
+      <label class="slider"><span class="sl-name">Поток</span>
+        <input type="range" id="flow" min="0.05" max="1" step="0.01" value="0.9" />
+        <output id="flowOut">0.90</output></label>
+      <label class="slider"><span class="sl-name">Интервал</span>
+        <input type="range" id="spacing" min="0.05" max="0.6" step="0.01" value="0.15" />
+        <output id="spacingOut">0.15</output></label>
+    </div>
+
+    <div class="tb-group" role="group" aria-label="История">
+      <span class="tb-label">История</span>
+      <div class="btn-row">
+        <button type="button" class="btn" id="undoBtn" title="Ctrl+Z">Отменить</button>
+        <button type="button" class="btn" id="redoBtn" title="Ctrl+Shift+Z">Вернуть</button>
+        <button type="button" class="btn btn--danger" id="clearBtn">Очистить</button>
+      </div>
+    </div>
+
+    <div class="tb-group" role="group" aria-label="Вид и панели">
+      <span class="tb-label">Вид</span>
+      <div class="btn-row">
+        <button type="button" class="btn" id="fitBtn">Вписать</button>
+        <button type="button" class="btn" id="layersBtn">Слои</button>
+        <button type="button" class="btn" id="logBtn">Лог</button>
+      </div>
+    </div>
+
+    <div class="tb-group" role="group" aria-label="TouchDesigner">
+      <span class="tb-label">TouchDesigner</span>
+      <div class="btn-row">
+        <button type="button" class="btn" id="rebuildBtn"
+                title="Пересобрать компонент из файлов на диске (обычно не нужно — TD собирает сам)">Пересобрать</button>
+        <button type="button" class="btn" id="selftestBtn"
+                title="Прогнать самопроверку в TD и получить сводку">Проверка</button>
+        <button type="button" class="btn" id="openBtn"
+                title="Открыть эту страницу в браузере на самом ПК с TD">Открыть на ПК</button>
+        <button type="button" class="btn" id="gitBtn"
+                title="Подтянуть свежие исходники из git; если что-то изменилось, TD пересоберёт компонент сам">Обновить из git</button>
+      </div>
+    </div>
+
+    <div id="statusPill" class="pill pill--off" title="Состояние связи с TouchDesigner">нет связи</div>
+  </header>
+
+  <!-- =====================================================================
+       Рабочая область: полотно + панель слоёв
+       ===================================================================== -->
+  <div id="middle">
+
+    <div id="canvasWrap">
+      <canvas id="view"></canvas>
+      <!-- Плавающий бейдж состояния прокси источника -->
+      <div id="proxyBadge" class="badge hidden">прокси: нет</div>
+      <!-- Всплывающие подсказки/ошибки -->
+      <div id="toasts" aria-live="polite"></div>
+      <!-- Кнопка-открывалка панели слоёв для узких экранов -->
+      <button type="button" class="drawer-tab" id="drawerTab">Слои</button>
+    </div>
+
+    <aside id="layersPanel" aria-label="Слои">
+      <div class="panel-head">
+        <h2>Слои</h2>
+        <button type="button" class="icon-btn" id="layersClose" title="Скрыть панель">✕</button>
+      </div>
+      <div id="layersList" class="layers-list"></div>
+      <p class="panel-note">
+        Нажмите на строку, чтобы выбрать слой для рисования: по слою <b>Источник</b>
+        кисть проявляет картинку, а ластик прячет её; по слою <b>Краска</b> кисть
+        рисует, ластик стирает. Панель скрывается крестиком и возвращается кнопкой
+        <b>«Слои»</b> в панели сверху (она подсвечена, пока панель открыта).
+      </p>
+    </aside>
+
+    <!-- Подложка под выдвижную панель (только узкие экраны) -->
+    <div id="drawerBackdrop" class="backdrop hidden"></div>
+  </div>
+
+  <!-- =====================================================================
+       Лог протокола (для баг-репортов)
+       ===================================================================== -->
+  <section id="logPanel" class="panel collapsed" aria-label="Лог протокола">
+    <div class="panel-head">
+      <h2>Лог</h2>
+      <span id="logCounter" class="muted"></span>
+      <div class="spacer"></div>
+      <button type="button" class="btn btn--small" id="logCopy">Скопировать лог</button>
+      <button type="button" class="btn btn--small" id="logClear">Очистить</button>
+      <button type="button" class="icon-btn" id="logToggle" title="Свернуть/развернуть">▾</button>
+    </div>
+    <div id="logView" class="log-view" role="log"></div>
+  </section>
+
+</div>
+
+<!-- Общий список источников (открывается из панели слоёв) -->
+<div id="sourcePicker" class="source-picker hidden" role="dialog" aria-label="Источники"></div>
+
+<!-- Классический скрипт: никаких ES-модулей, работает при статической раздаче -->
+<script src="app.js"></script>
+</body>
+</html>
