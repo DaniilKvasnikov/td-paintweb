@@ -10,10 +10,13 @@ td/last_build_report.txt
 !web/**/*.png
 !td/tests/**/*.png
 
-# Сборка TouchDesigner: проект и .tox живут вместе с проектом, не здесь
+# Сборка TouchDesigner: сам проект (.toe) живёт вместе с проектом, не здесь.
+# А вот готовый компонент для вставки в TouchDesigner лежит в dist/ и хранится
+# в репозитории намеренно: его удобно скачать и перетащить в свой проект.
 *.toe
 tox/
 *.tox
+!dist/*.tox
 
 # Python
 __pycache__/
