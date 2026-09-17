@@ -1244,6 +1244,19 @@ def build():
         tox = os.path.normpath(tox)
         base.save(tox)
         rep('сохранён %s' % tox)
+        # Копия в репозиторий веб-интерфейса: там она лежит в dist/ и обновляется
+        # каждой сборкой, чтобы готовый компонент для вставки в TouchDesigner
+        # всегда соответствовал исходникам. Папки может не быть (например сборка
+        # идёт вообще без репозитория) — это не ошибка.
+        repo_dist = os.path.normpath(os.path.join(paint_dir, '..', 'td-paintweb', 'dist'))
+        if os.path.isdir(repo_dist):
+            try:
+                import shutil
+                copy_path = os.path.join(repo_dist, 'paint_web.tox')
+                shutil.copyfile(tox, copy_path)
+                rep('копия компонента в репозитории: %s' % copy_path)
+            except Exception as e:
+                rep('копия в репозиторий не сделана: %s' % e)
     except Exception as e:
         rep('tox не сохранён: %s' % e)
 
